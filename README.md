@@ -69,6 +69,15 @@ Edition Manager includes a full-featured desktop [GUI](https://github.com/Entree
 python edition_manager_gui.py
 ```
 > 💡 On Windows, you can double-click `edition_manager_gui.pyw` to launch it directly.
+[server]
+# Plex 服务器的地址，格式为 http://服务器 IP 地址:32400 或 http(s)://域名:端口号
+address = http://127.0.0.1:32400
+# Plex 服务器的 token，用于身份验证
+token = xxxxxxxxxxxxxxxxxxxx
+# 指定需要跳过的资料库，格式为库名1；库名2；库名3，若没有需要跳过的资料库，可以留空
+skip_libraries = 云电影；演唱会
+# 语言设置，zh 代表中文，en 代表英文
+language = zh
 
 The GUI supports:
 
@@ -166,7 +175,7 @@ All of this will be automatically handled by EMP, without the need to edit or mo
 
 You can use EMP to add extra display information to your movies according to your needs and preferences. We provide features for writing and removing Editions, allowing you to try any combination freely and remove all Edition information with one click at any time. Although Edition is an exclusive feature for Plex Pass, EMP allows you to use the Edition feature without a Pass subscription.
 
-## Demo
+## Examples
 Configuration `order = Cut;Release` looks like this:
 
 ![Cut Release](https://github.com/x1ao4/edition-manager-for-plex/assets/112841659/28047dfe-a058-4cf3-8a32-ca8882edae15)
@@ -300,7 +309,7 @@ address = http://127.0.0.1:32400
 token = xxxxxxxxxxxxxxxxxxxx
 # Specify libraries to skip, format should be LibraryName1;LibraryName2;LibraryName3, leave empty if no libraries need to be skipped
 skip_libraries = Cloud Movie;Concert
-# Language setting, 'zh' for Chinese, 'en' for English
+# Language setting, zh for Chinese, en for English
 language = en
 
 [modules]
