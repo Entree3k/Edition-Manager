@@ -160,6 +160,12 @@ Edit the `config/config.ini` file to customize Edition Manager.
 `max_workers` - Number of concurrent threads
 
 `batch_size` - Movies processed per batch
+<img width="399" alt="赞赏" src="https://github.com/x1ao4/edition-manager-for-plex/assets/112841659/b9e79a88-f2af-4c3a-8278-479454c6393a">
+<br><br>
+<a href="#edition-manager-for-plex-zh">回到顶部</a>
+<br>
+<br>
+<br>
 
 ## Previews
 
@@ -305,7 +311,7 @@ The EMP operates in three modes: `add editions for all movies (all)`, `add editi
 Note: The `add editions for new movies` mode requires the server administrator account to be subscribed to Plex Pass in order to use.
 
 ## Configuration
-Before using EMP, please configure `/config/config.ini` according to the following example:
+Before using EMP, please configure the `/config/config.ini` file according to the following tips (example).
 ```
 [server]
 # Address of the Plex server, formatted as http://server IP address:32400 or http(s)://domain:port
@@ -506,3 +512,6 @@ If you enjoy Edition Manager, please consider giving it a **⭐ on GitHub**
 or [buying me a slice of pizza 🍕](https://www.buymeacoffee.com/Entree).  
 
 Your support helps keep development going!
+<img width="399" alt="Support" src="https://github.com/x1ao4/edition-manager-for-plex/assets/112841659/b9e79a88-f2af-4c3a-8278-479454c6393a">
+<br><br>
+<a href="#edition-manager-for-plex-en">Back to Top</a>
