@@ -8,6 +8,8 @@ import logging
 import requests
 import argparse
 import threading
+from datetime import datetime, UTC
+from typing import List, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from configparser import ConfigParser
@@ -16,7 +18,8 @@ _progress_lock = Lock()
 _progress_total = 1
 _progress_done = 0
 
-###################################################
+BACKUP_DIR = Path(__file__).parent / 'metadata_backup'
+BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
 def _ensure_utf8_stream(stream):
     try:
@@ -47,8 +50,6 @@ if os.name == "nt" and sys.stdout.isatty():
         kernel32.SetConsoleCP(65001)
     except Exception:
         pass
-
-######################################################
 
 def _progress_set_total(n: int):
     global _progress_total, _progress_done
@@ -115,24 +116,22 @@ def find_movies_by_title(server, token, title):
         lib_title = lib.get('title')
         resp = make_request(f"{server}/library/sections/{key}/all?title={requests.utils.quote(title)}", headers)
         for m in resp.get('MediaContainer', {}).get('Metadata', []) or []:
-            # Return just what we need to show and to process
             results.append({
                 'ratingKey': m.get('ratingKey'),
                 'title':     m.get('title'),
                 'year':      m.get('year'),
                 'thumb':     m.get('thumb'),
                 'library':   lib_title,
-                'raw':       m,  # minimal object in case we want to process directly
+                'raw':       m,
             })
     return results
 
 def get_movie_by_rating_key(server, token, rating_key):
-    """Fetch full movie metadata given a ratingKey."""
+    """Fetch full movie metadata from a ratingKey."""
     headers = {'X-Plex-Token': token, 'Accept': 'application/json'}
     data = make_request(f'{server}/library/metadata/{rating_key}', headers)
     md = (data.get('MediaContainer', {}).get('Metadata') or [])
     return md[0] if md else None
-
 
 # Initialize settings
 def initialize_settings():
@@ -280,7 +279,7 @@ def process_single_movie(
     skip_multiple_audio_tracks,
     tmdb_api_key
 ):
-    # 1. get full metadata
+    # get full metadata
     headers = {'X-Plex-Token': token, 'Accept': 'application/json'}
     movie_id = movie['ratingKey']
 
@@ -299,7 +298,7 @@ def process_single_movie(
 
     movie_data = detailed_movie if detailed_movie else movie
 
-    # 2. figure out filename (needed for Cut / Release / Source)
+    # gets the filename
     media_list = movie_data.get('Media', [])
     if not media_list:
         return
@@ -315,7 +314,7 @@ def process_single_movie(
 
     tags = []
 
-    # 3. import modules
+    # import modules
     from modules.AudioChannels import get_AudioChannels
     from modules.AudioCodec import get_AudioCodec
     from modules.Bitrate import get_Bitrate
@@ -339,7 +338,7 @@ def process_single_movie(
     from modules.VideoCodec import get_VideoCodec
     from modules.Writer import get_Writer
 
-    # 4. run modules
+    # run modules
     for module in modules:
         try:
             if module == 'AudioChannels':
@@ -466,7 +465,6 @@ def update_movie(server, token, movie, tags, modules):
     
     return True
 
-# Reset movies with multi-threading
 def reset_movies(server, token, skip_libraries, max_workers, batch_size):
     headers = {'X-Plex-Token': token, 'Accept': 'application/json'}
     libraries = make_request(f'{server}/library/sections', headers)['MediaContainer']['Directory']
@@ -513,32 +511,84 @@ def reset_movie(server, token, movie):
         return False
 
 # Backup metadata
-def backup_metadata(server, token, backup_file):
+def _backup_filename() -> Path:
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    return BACKUP_DIR / f"metadata_backup_{ts}.json"
+
+def list_backups() -> List[Path]:
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    return sorted(BACKUP_DIR.glob("metadata_backup_*.json"))
+
+def latest_backup() -> Path | None:
+    files = list_backups()
+    return files[-1] if files else None
+
+def backup_metadata(server, token, backup_file: Path | None = None):
     headers = {'X-Plex-Token': token, 'Accept': 'application/json'}
     libraries = make_request(f'{server}/library/sections', headers)['MediaContainer']['Directory']
-    metadata = {}
+
+    payload = {
+        "version": "1.0",
+        "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "data": {}
+    }
+
     for lib in libraries:
         if lib.get('type') == 'movie':
             response = make_request(f"{server}/library/sections/{lib['key']}/all", headers)
-            for movie in response['MediaContainer'].get('Metadata', []):
-                metadata[movie['ratingKey']] = {
+            for movie in response['MediaContainer'].get('Metadata', []) or []:
+                payload["data"][movie['ratingKey']] = {
                     'title': movie.get('title', ''),
                     'editionTitle': movie.get('editionTitle', '')
                 }
 
-    backup_file = Path(backup_file)  # normalize in case a string is passed
-    backup_file.parent.mkdir(parents=True, exist_ok=True)
-    with backup_file.open('w', encoding='utf-8') as f:
-        json.dump(metadata, f, indent=2)
-    print(f"Backup complete. {len(metadata)} movies saved to {backup_file}")
+    backup_path = Path(backup_file) if backup_file else _backup_filename()
+    backup_path.parent.mkdir(parents=True, exist_ok=True)
 
-# Improved restore metadata function
-def restore_metadata(server, token, backup_file):
-    with open(backup_file, 'r', encoding='utf-8') as f:
+    # atomic-ish write
+    tmp = backup_path.with_suffix(backup_path.suffix + ".tmp")
+    with tmp.open('w', encoding='utf-8') as f:
+        json.dump(payload, f, indent=2)
+    tmp.replace(backup_path)
+
+    print(f"Backup complete. {len(payload['data'])} movies saved to {backup_path}")
+    prune_old_backups(keep=4)
+    return backup_path
+
+def prune_old_backups(keep: int = 4) -> None:
+    files = sorted(BACKUP_DIR.glob("metadata_backup_*.json"))
+    if len(files) <= keep:
+        return
+    to_delete = files[:-keep]  # oldest first
+    for p in to_delete:
+        try:
+            p.unlink()
+        except Exception as e:
+            logger.warning(f"Could not delete old backup '{p}': {e}")
+
+# Restore metadata
+def restore_metadata(server, token, backup_file: Path | str | None):
+    if backup_file is None:
+        # Fallback to latest backup if none specified
+        bf = latest_backup()
+        if not bf:
+            logger.error("No backup files found.")
+            return
+        backup_file = bf
+        logger.info(f"Using latest backup: {backup_file}")
+
+    backup_file = Path(backup_file)
+    if not backup_file.exists():
+        logger.error(f"Backup file not found: {backup_file}")
+        return
+
+    with backup_file.open('r', encoding='utf-8') as f:
         metadata = json.load(f)
 
-    items = list(metadata.items())
-    logger.info(f"Starting restore for {len(items)} movies")
+    data = metadata.get("data", metadata)  # backward compatible if old format
+    items = list(data.items())
+
+    logger.info(f"Starting restore from {backup_file} for {len(items)} movies")
     _progress_set_total(len(items))
 
     def _restore_one(pair):
@@ -546,8 +596,12 @@ def restore_metadata(server, token, backup_file):
         edition = meta.get('editionTitle', '')
         params = {'type': 1, 'id': movie_id, 'editionTitle.value': edition, 'editionTitle.locked': 1 if edition else 0}
         s = get_session()
-        s.put(f'{server}/library/metadata/{movie_id}', headers={'X-Plex-Token': token}, params=params)
-        _progress_step()
+        try:
+            s.put(f'{server}/library/metadata/{movie_id}', headers={'X-Plex-Token': token}, params=params)
+        except Exception as e:
+            logger.error(f"Failed restore id={movie_id}: {e}")
+        finally:
+            _progress_step()
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
     with ThreadPoolExecutor(max_workers=8) as ex:
@@ -557,7 +611,6 @@ def restore_metadata(server, token, backup_file):
 
     logger.info("Restore complete.")
 
-# Main function
 def main():
     (
         server,
@@ -580,16 +633,17 @@ def main():
     parser.add_argument('--reset', action='store_true', help='Reset edition info for all movies')
     parser.add_argument('--backup', action='store_true', help='Backup movie metadata')
     parser.add_argument('--restore', action='store_true', help='Restore movie metadata from backup')
+    parser.add_argument('--list-backups', action='store_true', help='List available backup files')
+    parser.add_argument('--restore-file', dest='restore_file', metavar='PATH', help='Restore from a specific backup file')
     
     args = parser.parse_args()
-    
-    backup_file = Path(__file__).parent / 'metadata_backup' / 'metadata_backup.json'
 
     if args.one_id:
         ok = process_movie_by_rating_key(
             server, token, args.one_id, modules, excluded_languages, skip_multiple_audio_tracks, tmdb_api_key
         )
         logger.info('Done.' if ok else 'Failed.')
+
     elif args.one:
         # Interactive terminal flow
         title = input("Enter movie title to search: ").strip()
@@ -624,13 +678,29 @@ def main():
         )
         logger.info('Done.' if ok else 'Failed.')
 
-    #make if to revert
     elif args.backup:
-        backup_metadata(server, token, backup_file)
+        backup_metadata(server, token, None)
         logger.info('Metadata backup completed.')
-    elif args.restore:
-        restore_metadata(server, token, backup_file)
+
+    elif args.restore_file:
+        restore_metadata(server, token, args.restore_file)
         logger.info('Metadata restoration completed.')
+
+    elif args.restore:
+        # Restore using the latest timestamped backup automatically
+        restore_metadata(server, token, None)
+        logger.info('Metadata restoration completed.')
+
+    elif args.list_backups:
+        files = list_backups()
+        if not files:
+            print("No backups found in", BACKUP_DIR)
+        else:
+            print("Available backups:")
+            for p in files:
+                print(" -", p)
+        logger.info('Listed backups.')
+
     elif args.all:
         process_movies(
             server,
@@ -643,6 +713,7 @@ def main():
             max_workers,
             batch_size
         )
+
     elif args.reset:
         reset_movies(
             server,
@@ -651,6 +722,7 @@ def main():
             max_workers,
             batch_size
         )
+
     else:
         logger.info('No action specified. Please use one of the following arguments:')
         logger.info('  --all: Add edition info to all movies')
@@ -658,7 +730,7 @@ def main():
         logger.info('  --reset: Reset edition info for all movies')
         logger.info('  --backup: Backup movie metadata')
         logger.info('  --restore: Restore movie metadata from backup')
-    
+
     logger.info('Script execution completed.')
 
 if __name__ == '__main__':

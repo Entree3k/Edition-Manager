@@ -697,14 +697,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_reset = QtWidgets.QPushButton("Reset All Movies"); self.btn_reset.setObjectName("Outlined")
         self.btn_backup = QtWidgets.QPushButton("Backup Editions"); self.btn_backup.setObjectName("Outlined")
         self.btn_restore = QtWidgets.QPushButton("Restore Editions"); self.btn_restore.setObjectName("Outlined")
+        self.btn_restore_file = QtWidgets.QPushButton("Restore from file…"); self.btn_restore_file.setObjectName("Outlined")
         self.btn_settings = QtWidgets.QPushButton("Settings"); self.btn_settings.setObjectName("Outlined")
 
         ag.addWidget(self.btn_all,    0, 0)
         ag.addWidget(self.btn_one,    0, 1)
-        ag.addWidget(self.btn_reset,  0, 2)
-        ag.addWidget(self.btn_backup, 0, 3)
-        ag.addWidget(self.btn_restore,0, 4)
-        ag.addWidget(self.btn_settings,0,5)
+        ag.addWidget(self.btn_reset,  1, 0)
+        ag.addWidget(self.btn_backup, 0, 2)
+        ag.addWidget(self.btn_restore,1, 2)
+        ag.addWidget(self.btn_restore_file, 1, 1)
+        ag.addWidget(self.btn_settings,0,3)
         root.addWidget(actions_group)
 
         # ---- Section: Progress ----
@@ -714,9 +716,7 @@ class MainWindow(QtWidgets.QMainWindow):
         pg = QtWidgets.QGridLayout(prog_group)
         pg.setContentsMargins(16, 16, 16, 16)
         self.progress = QtWidgets.QProgressBar(); self.progress.setRange(0, 100); self.progress.setValue(0)
-        self.percent_lab = QtWidgets.QLabel("0%")
         pg.addWidget(self.progress, 0, 0, 1, 1)
-        pg.addWidget(self.percent_lab, 1, 0, 1, 1, alignment=Qt.AlignLeft)
         root.addWidget(prog_group)
 
         # ---- Section: Status ----
@@ -764,6 +764,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_reset.clicked.connect(lambda: self.run_flag("--reset"))
         self.btn_backup.clicked.connect(lambda: self.run_flag("--backup"))
         self.btn_restore.clicked.connect(lambda: self.run_flag("--restore"))
+        self.btn_restore_file.clicked.connect(self._restore_from_file)
         self.btn_cancel.clicked.connect(self.cancel_current_operation)
 
         # Timer to update percent label
@@ -977,7 +978,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.verticalScrollBar().setValue(self.status.verticalScrollBar().maximum())
 
     def _set_buttons_enabled(self, enabled: bool):
-        for b in (self.btn_one, self.btn_all, self.btn_reset, self.btn_backup, self.btn_restore, self.btn_settings):
+        for b in (self.btn_one, self.btn_all, self.btn_reset, self.btn_backup, self.btn_restore, self.btn_restore_file, self.btn_settings):
             b.setEnabled(enabled)
 
     def _webhook_cmd(self):
@@ -1066,6 +1067,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
             if self._should_show_webhook_line(line):
                 self.append_status(f"[webhook] {line}")
+
+    def _restore_from_file(self):
+        start_dir = str((Path(__file__).parent / "metadata_backup").resolve())
+        dlg = QtWidgets.QFileDialog(self, "Choose Edition Manager backup")
+        dlg.setFileMode(QtWidgets.QFileDialog.ExistingFile)
+        dlg.setNameFilters(["JSON Backups (*.json)", "All Files (*)"])
+        dlg.setDirectory(start_dir)
+
+        if dlg.exec() == QtWidgets.QDialog.Accepted:
+            paths = dlg.selectedFiles()
+            if paths:
+                path = paths[0]
+                # call CLI with explicit file path
+                self.run_flag(f"--restore-file={path}")
 
     @QtCore.Slot(int, QtCore.QProcess.ExitStatus)
     def _on_webhook_finished(self, code: int, _status):
