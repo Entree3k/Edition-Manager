@@ -975,9 +975,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_percent(self):
         if self.progress.maximum() == 0:
-            self.percent_lab.setText("…")
+            self.progress.setFormat("…")
         else:
-            self.percent_lab.setText(f"{self.progress.value()}%")
+            self.progress.setFormat(f"{self.progress.value()}%")
 
     @QtCore.Slot(str)
     def append_status(self, text: str):
