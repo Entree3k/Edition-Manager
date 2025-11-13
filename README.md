@@ -59,6 +59,8 @@ Each module extracts a specific piece of metadata and contributes it to your Ple
 
 ## GUI Usage
 
+<img width="652.6666666666667" height="498.6666666666667" alt="edition_manager" src="https://github.com/user-attachments/assets/8a0b22ae-66ba-45d8-921b-41764e8b34e0" />
+
 Edition Manager includes a full-featured desktop [GUI](https://github.com/Entree3k/Edition-Manager/blob/main/Edition%20Manager%20GUI.md).
 ```bash
 python edition_manager_gui.py
