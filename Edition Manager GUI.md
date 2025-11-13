@@ -25,6 +25,8 @@ Edition Manager scans your Plex movie libraries and writes a smart **Edition Tit
 
 ## Main window
 
+<img width="652.6666666666667" height="498.6666666666667" alt="edition_manager" src="https://github.com/user-attachments/assets/8a0b22ae-66ba-45d8-921b-41764e8b34e0" />
+
 -   **Actions**
     
     -   **Process All Movies**: Run Edition Manager on every movie in un‑skipped libraries
@@ -49,6 +51,8 @@ Edition Manager scans your Plex movie libraries and writes a smart **Edition Tit
 
 ## Settings
 
+<img width="478.6666666666667" height="392" alt="settings" src="https://github.com/user-attachments/assets/f938cbfc-5bd9-4197-81d0-ae5b8549fbe1" />
+
 Settings are organized into tabs. All changes are saved to a `config.ini` in the app’s `config/` folder when you click **Save**
 
 ### Server
@@ -65,11 +69,15 @@ Settings are organized into tabs. All changes are saved to a `config.ini` in the
 
 ### Modules
 
+<img width="478.6666666666667" height="392.6666666666667" alt="modules" src="https://github.com/user-attachments/assets/6a9d39f2-ac8a-43c1-8023-63ae383a34c0" />
+
 -   **Drag to reorder**; **check to enable**. Enabled modules run top‑to‑bottom and compose the Edition Title in that order.
     
 -   Modules include: AudioChannels, AudioCodec, Bitrate, ContentRating, Country, Cut, Director, Duration, DynamicRange, FrameRate, Genre, Language, Rating, Release, Resolution, ShortFilm, Size, Source, SpecialFeatures, Studio, VideoCodec, Writer
 
 ### Language
+
+<img width="480" height="392.6666666666667" alt="language" src="https://github.com/user-attachments/assets/27fff059-bb2e-4bb4-b475-ea0ceec8f224" />
 
 -   **Excluded Languages** — Comma‑separated list; any matching audio track languages will be ignored when selecting a primary language tag.
     
@@ -78,6 +86,8 @@ Settings are organized into tabs. All changes are saved to a `config.ini` in the
 
 ### Rating
 
+<img width="478.6666666666667" height="390.6666666666667" alt="rating" src="https://github.com/user-attachments/assets/ae63c8b8-e9f6-4b81-94bd-1de4a30cf1a2" />
+
 -   **Source** — Choose **IMDB** (via TMDb) or **Rotten Tomatoes**
     
 -   **Rotten Tomatoes Type** — **Critics** or **Audience** (only used when source is Rotten Tomatoes)
@@ -85,6 +95,8 @@ Settings are organized into tabs. All changes are saved to a `config.ini` in the
 -   **TMDb API Key** — Required for IMDB source  
 
 ### Performance
+
+<img width="478.6666666666667" height="390.6666666666667" alt="performance" src="https://github.com/user-attachments/assets/96d43924-de65-44f7-ae24-bccdcb795566" />
 
 -   **Hardware** — Shows detected CPU threads
 
@@ -97,9 +109,10 @@ Settings are organized into tabs. All changes are saved to a `config.ini` in the
 
 ### Appearance
 
+<img width="478.6666666666667" height="390.6666666666667" alt="appearance" src="https://github.com/user-attachments/assets/04c1753f-971c-4b0d-a5cc-826d8bc06f15" />
+
 -   **Primary Highlight Color** — Pick a brand color for buttons, progress, and accents
 -   **Dark Mode** — Toggle a dark UI theme.
-
 
 ## Webhook auto‑processing (optional)
 
