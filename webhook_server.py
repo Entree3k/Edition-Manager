@@ -4,10 +4,13 @@ import threading
 import datetime as dt
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, request, jsonify
+from pathlib import Path
+from configparser import ConfigParser
 from edition_manager import (
     initialize_settings,
     process_movie_by_rating_key,
 )
+
 
 app = Flask(__name__)
 log = logging.getLogger("werkzeug")
@@ -24,6 +27,12 @@ log.setLevel(logging.WARNING)
     MAX_WORKERS,
     BATCH_SIZE,
 ) = initialize_settings()
+
+_cfg = ConfigParser()
+_cfg.read(Path(__file__).parent / "config" / "config.ini")
+
+WEBHOOK_HOST = _cfg.get("webhook", "host", fallback="0.0.0.0")
+WEBHOOK_PORT = _cfg.getint("webhook", "port", fallback=5000)
 
 EXECUTOR = ThreadPoolExecutor(max_workers=2)
 
@@ -113,6 +122,11 @@ def edition_manager():
     return jsonify(queued=True, ratingKey=rating_key), 202
 
 if __name__ == "__main__":
-
     from waitress import serve
-    serve(app, host="0.0.0.0", port=5000)
+
+    logging.basicConfig(level=logging.INFO)
+    logging.getLogger(__name__).info(
+        "Starting Edition Manager webhook on %s:%s", WEBHOOK_HOST, WEBHOOK_PORT
+    )
+
+    serve(app, host=WEBHOOK_HOST, port=WEBHOOK_PORT)
