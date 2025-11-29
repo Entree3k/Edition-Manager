@@ -4,6 +4,12 @@ def get_Cut(file_name):
     name_low = file_name.lower()
 
     patterns = [
+        (r"\.dc\.", "Director's Cut"),
+        (r"\.ee\.", "Extended"),
+        (r"\.se\.", "Special Edition"),
+        (r"\.rm4k\.", "Remastered 4K"),
+        (r"\.rm\.", "Remastered"),
+        (r"\.dubbed\.", "Dubbed"),
         (r"director'?s[ ._-]?cut|dirs[ ._-]?cut|dir[ ._-]?cut", "Director's Cut"),
         (r"extended( [._-]?(cut|edition|version))?", "Extended"),
         (r"(final)[ ._-]?cut", "Final Cut"),
