@@ -299,7 +299,7 @@ The GUI supports:
 # 指定需要写入的模块及其排序，格式为模块1；模块2；模块3，可选模块包括剪辑版本、发行版本、片源版本、分辨率、动态范围、视频编码、帧率、音频编码、比特率、大小、国家、内容分级、评分、时长
 order = 片源版本；动态范围
 ```
-由于 EMP 只会对电影类型的资料库进行处理，所以在指定需要跳过的资料库时，指定需要跳过的电影类型的资料库即可。写入版本信息的模块没有数量限制，可以根据需要自行选配。
+由于 EMP 只会对电影和其他影片类型的资料库进行处理，所以在指定需要跳过的资料库时，指定需要跳过的电影和其他影片类型的资料库即可。写入版本信息的模块没有数量限制，可以根据需要自行选配。
 
 -   All or single-movie processing
     
@@ -546,7 +546,7 @@ language = en
 # Specify modules to write and their order, format should be Module1;Module2;Module3, optional modules include Cut, Release, Source, Resolution, DynamicRange, VideoCodec, FrameRate, AudioCodec, Bitrate, Size, Country, ContentRating, Rating, Duration
 order = Source;DynamicRange
 ```
-Since EMP only processes libraries of movie type, specify libraries of movie type to skip when needed. There is no limit to the number of modules for writing editions, so you can choose and configure them according to your needs.
+Since EMP only processes movie-type libraries, specify Movies and Other Videos libraries to skip when needed. There is no limit to the number of modules for writing editions, so you can choose and configure them according to your needs.
 
 When running in `add editions for new movies` mode, EMP creates a Flask web server that listens on port `8089` to receive `library.new` events sent by the Plex server. This allows it to capture metadata for newly added items and process them accordingly.
 
