@@ -15,11 +15,65 @@ from pathlib import Path
 from configparser import ConfigParser
 from threading import Lock
 _progress_lock = Lock()
+
+# Import all modules at top-level for better performance
+from modules.AudioChannels import get_AudioChannels
+from modules.AudioCodec import get_AudioCodec
+from modules.Bitrate import get_Bitrate
+from modules.ContentRating import get_ContentRating
+from modules.Country import get_Country
+from modules.Cut import get_Cut
+from modules.Director import get_Director
+from modules.Duration import get_Duration
+from modules.DynamicRange import get_DynamicRange
+from modules.FrameRate import get_FrameRate
+from modules.Genre import get_Genre
+from modules.Language import get_Language
+from modules.Rating import get_Rating
+from modules.Release import get_Release
+from modules.Resolution import get_Resolution
+from modules.ShortFilm import get_ShortFilm
+from modules.Size import get_Size
+from modules.Source import get_Source
+from modules.SpecialFeatures import get_SpecialFeatures
+from modules.Studio import get_Studio
+from modules.VideoCodec import get_VideoCodec
+from modules.Writer import get_Writer
+
+# Module registry: maps module name to (function, required_args)
+# Args can be: 'movie_data', 'file_name', 'excluded_languages', 'skip_multiple_audio_tracks', 'tmdb_api_key'
+MODULE_REGISTRY = {
+    "AudioChannels": (get_AudioChannels, ["movie_data"]),
+    "AudioCodec": (get_AudioCodec, ["movie_data"]),
+    "Bitrate": (get_Bitrate, ["movie_data"]),
+    "ContentRating": (get_ContentRating, ["movie_data"]),
+    "Country": (get_Country, ["movie_data"]),
+    "Cut": (get_Cut, ["file_name"]),
+    "Director": (get_Director, ["movie_data"]),
+    "Duration": (get_Duration, ["movie_data"]),
+    "DynamicRange": (get_DynamicRange, ["movie_data"]),
+    "FrameRate": (get_FrameRate, ["movie_data"]),
+    "Genre": (get_Genre, ["movie_data"]),
+    "Language": (get_Language, ["movie_data", "excluded_languages", "skip_multiple_audio_tracks"]),
+    "Rating": (get_Rating, ["movie_data", "tmdb_api_key"]),
+    "Release": (get_Release, ["file_name"]),
+    "Resolution": (get_Resolution, ["movie_data"]),
+    "ShortFilm": (get_ShortFilm, ["movie_data"]),
+    "Size": (get_Size, ["movie_data"]),
+    "Source": (get_Source, ["file_name", "movie_data"]),
+    "SpecialFeatures": (get_SpecialFeatures, ["movie_data"]),
+    "Studio": (get_Studio, ["movie_data"]),
+    "VideoCodec": (get_VideoCodec, ["movie_data"]),
+    "Writer": (get_Writer, ["movie_data"]),
+}
 _progress_total = 1
 _progress_done = 0
 
 BACKUP_DIR = Path(__file__).parent / 'metadata_backup'
 BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+
+# Undo snapshot - separate from manual backups
+UNDO_SNAPSHOT_FILE = BACKUP_DIR / '.undo_snapshot.json'
 
 def _ensure_utf8_stream(stream):
     try:
@@ -66,11 +120,35 @@ def _progress_step(k: int = 1):
     print(f"PROGRESS {min(100, max(0, pct))}")
     sys.stdout.flush()
 
-# Create a logger
+# Token obfuscation for secure logging
+def mask_sensitive_data(text: str) -> str:
+    """Mask tokens and sensitive data in log messages."""
+    if not isinstance(text, str):
+        return str(text)
+    # Mask X-Plex-Token in URLs
+    text = re.sub(r'X-Plex-Token=[^&\s]+', 'X-Plex-Token=***', text, flags=re.IGNORECASE)
+    # Mask token parameter
+    text = re.sub(r'token=[^&\s]+', 'token=***', text, flags=re.IGNORECASE)
+    # Mask Bearer tokens
+    text = re.sub(r'Bearer\s+[A-Za-z0-9\-_]+', 'Bearer ***', text)
+    # Mask API keys
+    text = re.sub(r'api_key=[^&\s]+', 'api_key=***', text, flags=re.IGNORECASE)
+    return text
+
+
+class SecureFormatter(logging.Formatter):
+    """Logging formatter that masks sensitive data like tokens."""
+
+    def format(self, record):
+        original = super().format(record)
+        return mask_sensitive_data(original)
+
+
+# Create a logger with secure formatting
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 handler = logging.StreamHandler(sys.stdout)
-formatter = logging.Formatter('[%(asctime)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+formatter = SecureFormatter('[%(asctime)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
@@ -133,11 +211,159 @@ def get_movie_by_rating_key(server, token, rating_key):
     md = (data.get('MediaContainer', {}).get('Metadata') or [])
     return md[0] if md else None
 
+
+def fetch_metadata_batch(server, token, rating_keys, batch_size=50):
+    """
+    Fetch detailed metadata for multiple movies in batched API calls.
+
+    Plex API supports fetching multiple items via comma-separated ratingKeys.
+    This reduces N individual API calls to N/batch_size calls.
+
+    Args:
+        server: Plex server URL
+        token: Plex auth token
+        rating_keys: List of ratingKey strings/ints
+        batch_size: Number of items per API call (default 50, max ~100 recommended)
+
+    Returns:
+        Dict mapping ratingKey -> detailed metadata dict
+    """
+    headers = {'X-Plex-Token': token, 'Accept': 'application/json'}
+    result = {}
+
+    # Process in batches
+    for i in range(0, len(rating_keys), batch_size):
+        batch_keys = rating_keys[i:i + batch_size]
+        keys_param = ','.join(str(k) for k in batch_keys)
+
+        try:
+            # Plex supports comma-separated ratingKeys in metadata endpoint
+            url = f'{server}/library/metadata/{keys_param}'
+            data = make_request(url, headers)
+
+            metadata_list = data.get('MediaContainer', {}).get('Metadata', []) or []
+            for item in metadata_list:
+                rk = str(item.get('ratingKey'))
+                result[rk] = item
+
+        except Exception as e:
+            logger.warning(f"Batch metadata fetch failed for keys {i}-{i+len(batch_keys)}: {e}")
+            # Fallback: fetch individually for this batch
+            for rk in batch_keys:
+                try:
+                    url = f'{server}/library/metadata/{rk}'
+                    data = make_request(url, headers)
+                    md = data.get('MediaContainer', {}).get('Metadata', [])
+                    if md:
+                        result[str(rk)] = md[0]
+                except Exception as e2:
+                    logger.warning(f"Individual fetch failed for {rk}: {e2}")
+
+    return result
+
+
+# Module name to template variable mapping
+MODULE_TO_VAR = {
+    "AudioChannels": "audio_channels",
+    "AudioCodec": "audio_codec",
+    "Bitrate": "bitrate",
+    "ContentRating": "content_rating",
+    "Country": "country",
+    "Cut": "cut",
+    "Director": "director",
+    "Duration": "duration",
+    "DynamicRange": "dynamic_range",
+    "FrameRate": "frame_rate",
+    "Genre": "genre",
+    "Language": "language",
+    "Rating": "rating",
+    "Release": "release",
+    "Resolution": "resolution",
+    "ShortFilm": "short_film",
+    "Size": "size",
+    "Source": "source",
+    "SpecialFeatures": "special_features",
+    "Studio": "studio",
+    "VideoCodec": "video_codec",
+    "Writer": "writer",
+}
+
+
+def get_template_settings():
+    """Load template settings from config."""
+    config_file = Path(__file__).parent / 'config' / 'config.ini'
+    config = ConfigParser()
+    config.read(config_file, encoding="utf-8")
+
+    template_format = config.get('template', 'format', fallback='auto').strip()
+    separator = config.get('template', 'separator', fallback=' • ')
+    # Handle empty separator or bare bullet (ConfigParser strips trailing whitespace)
+    if not separator or separator.strip() == '•':
+        separator = ' • '
+    max_length = config.getint('template', 'max_length', fallback=0)
+
+    return template_format, separator, max_length
+
+
+def format_edition_title(module_results: dict, modules: list, template_format: str, separator: str, max_length: int) -> str:
+    """
+    Format edition title using template or auto mode.
+
+    Args:
+        module_results: Dict mapping module names to their output values
+        modules: List of enabled modules in order
+        template_format: 'auto' or a custom format string like '{cut} - {resolution}'
+        separator: Separator for auto mode
+        max_length: Maximum title length (0 = unlimited)
+
+    Returns:
+        Formatted edition title string
+    """
+    if template_format.lower() == 'auto':
+        # Auto mode: join all non-empty results in module order
+        tags = []
+        for module in modules:
+            value = module_results.get(module)
+            if value:
+                tags.append(value)
+        # Remove duplicates while preserving order
+        tags = list(dict.fromkeys(tags))
+        edition_title = separator.join(tags)
+    else:
+        # Custom template mode
+        # Build variable dict from module results
+        variables = {}
+        for module_name, var_name in MODULE_TO_VAR.items():
+            variables[var_name] = module_results.get(module_name, '') or ''
+
+        # Replace template variables
+        edition_title = template_format
+        for var_name, value in variables.items():
+            edition_title = edition_title.replace('{' + var_name + '}', value)
+
+        # Clean up multiple separators and trim
+        # Remove empty placeholders that result in double separators
+        while '  ' in edition_title:
+            edition_title = edition_title.replace('  ', ' ')
+        # Clean up separators around empty values
+        common_seps = [' · ', ' - ', ' | ', ' / ', ', ']
+        for sep in common_seps:
+            while sep + sep in edition_title:
+                edition_title = edition_title.replace(sep + sep, sep)
+            edition_title = edition_title.strip(sep.strip())
+        edition_title = edition_title.strip()
+
+    # Apply max length if specified
+    if max_length > 0 and len(edition_title) > max_length:
+        edition_title = edition_title[:max_length - 3].rsplit(separator.strip(), 1)[0] + '...'
+
+    return edition_title
+
 # Initialize settings
 def initialize_settings():
     config_file = Path(__file__).parent / 'config' / 'config.ini'
     config = ConfigParser()
-    config.read(config_file)
+    config.read(config_file, encoding="utf-8")
 
     server = config.get('server', 'address')
     token = config.get('server', 'token')
@@ -167,6 +393,9 @@ def initialize_settings():
 
     max_workers = config.getint('performance', 'max_workers', fallback=10)
     batch_size = config.getint('performance', 'batch_size', fallback=25)
+    # Metadata batch size controls how many movies' detailed metadata to fetch per API call
+    # Higher values = fewer API calls, but larger responses. 50 is a safe default.
+    metadata_batch_size = config.getint('performance', 'metadata_batch_size', fallback=50)
 
     try:
         headers = {'X-Plex-Token': token, 'Accept': 'application/json'}
@@ -187,7 +416,8 @@ def initialize_settings():
         skip_multiple_audio_tracks,
         tmdb_api_key,
         max_workers,
-        batch_size
+        batch_size,
+        metadata_batch_size
     )
 
 # Batched movie processing
@@ -201,6 +431,26 @@ def process_movies_batch(
     tmdb_api_key,
     lib_title=""
 ):
+    """
+    Process a batch of movies with optimized batch metadata fetching.
+
+    Args:
+        movies_batch: List of movie dicts to process
+        server: Plex server URL
+        token: Plex auth token
+        modules: List of enabled module names
+        excluded_languages: Set of languages to exclude
+        skip_multiple_audio_tracks: Whether to skip multi-audio movies
+        tmdb_api_key: TMDb API key for ratings
+        lib_title: Library title for logging (optional)
+    """
+    if not movies_batch:
+        return
+
+    # Prefetch metadata for entire batch
+    rating_keys = [str(m['ratingKey']) for m in movies_batch]
+    prefetched_metadata = fetch_metadata_batch(server, token, rating_keys)
+
     for movie in movies_batch:
         try:
             process_single_movie(
@@ -210,7 +460,8 @@ def process_movies_batch(
                 modules,
                 excluded_languages,
                 skip_multiple_audio_tracks,
-                tmdb_api_key
+                tmdb_api_key,
+                prefetched_metadata
             )
         except Exception as e:
             logger.error(f"Error processing movie {movie.get('title', 'Unknown')}: {str(e)}")
@@ -225,8 +476,24 @@ def process_movies(
     skip_multiple_audio_tracks,
     tmdb_api_key,
     max_workers,
-    batch_size
+    batch_size,
+    metadata_batch_size=50
 ):
+    """
+    Process all movies in the library with optimized batch metadata fetching.
+
+    Args:
+        server: Plex server URL
+        token: Plex auth token
+        skip_libraries: Set of library names to skip
+        modules: List of enabled module names
+        excluded_languages: Set of languages to exclude
+        skip_multiple_audio_tracks: Whether to skip multi-audio movies
+        tmdb_api_key: TMDb API key for ratings
+        max_workers: Number of concurrent workers
+        batch_size: Number of movies per processing batch
+        metadata_batch_size: Number of movies per metadata API call (default 50)
+    """
     headers = {'X-Plex-Token': token, 'Accept': 'application/json'}
     libraries = make_request(f'{server}/library/sections', headers)['MediaContainer']['Directory']
 
@@ -246,10 +513,23 @@ def process_movies(
 
     _progress_set_total(len(all_movies))
 
+    total_batches = (len(all_movies) + batch_size - 1) // batch_size
+
     from concurrent.futures import ThreadPoolExecutor, as_completed
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         for i in range(0, len(all_movies), batch_size):
             batch = all_movies[i:i+batch_size]
+            batch_num = i // batch_size + 1
+
+            # Prefetch detailed metadata for entire batch in batched API calls
+            # This reduces N individual API calls to N/metadata_batch_size calls
+            rating_keys = [str(m['ratingKey']) for m in batch]
+            logger.info(f"Batch {batch_num}/{total_batches}: Prefetching metadata for {len(rating_keys)} movies...")
+
+            prefetched_metadata = fetch_metadata_batch(server, token, rating_keys, metadata_batch_size)
+            logger.info(f"Batch {batch_num}/{total_batches}: Prefetched {len(prefetched_metadata)} metadata entries")
+
+            # Process movies with prefetched data (no individual API calls needed)
             futures = [
                 executor.submit(
                     process_single_movie,
@@ -259,14 +539,15 @@ def process_movies(
                     modules,
                     excluded_languages,
                     skip_multiple_audio_tracks,
-                    tmdb_api_key
+                    tmdb_api_key,
+                    prefetched_metadata  # Pass prefetched data
                 )
                 for m in batch
             ]
             for _ in as_completed(futures):
                 _progress_step()
             logger.info(
-                f"Processed batch {i//batch_size + 1}/{(len(all_movies)+batch_size-1)//batch_size}"
+                f"Batch {batch_num}/{total_batches}: Processing complete"
             )
 
 # Process a single movie
@@ -277,24 +558,43 @@ def process_single_movie(
     modules,
     excluded_languages,
     skip_multiple_audio_tracks,
-    tmdb_api_key
+    tmdb_api_key,
+    prefetched_metadata=None
 ):
-    # get full metadata
-    headers = {'X-Plex-Token': token, 'Accept': 'application/json'}
-    movie_id = movie['ratingKey']
+    """
+    Process a single movie and update its edition title.
 
+    Args:
+        server: Plex server URL
+        token: Plex auth token
+        movie: Basic movie metadata dict (from library listing)
+        modules: List of enabled module names
+        excluded_languages: Set of languages to exclude
+        skip_multiple_audio_tracks: Whether to skip multi-audio movies
+        tmdb_api_key: TMDb API key for ratings
+        prefetched_metadata: Optional dict of ratingKey -> detailed metadata
+                            (from batch fetch). If provided, skips individual API call.
+    """
+    movie_id = str(movie['ratingKey'])
+
+    # Try to use prefetched metadata first (batch optimization)
     detailed_movie = None
-    try:
-        detailed_response = get_session().get(
-            f'{server}/library/metadata/{movie_id}',
-            headers=headers
-        )
-        if detailed_response.status_code == 200:
-            detailed_data = detailed_response.json()
-            if 'MediaContainer' in detailed_data and 'Metadata' in detailed_data['MediaContainer']:
-                detailed_movie = detailed_data['MediaContainer']['Metadata'][0]
-    except Exception as e:
-        logger.warning(f"Could not fetch detailed metadata for movie {movie.get('title', 'Unknown')}: {str(e)}")
+    if prefetched_metadata and movie_id in prefetched_metadata:
+        detailed_movie = prefetched_metadata[movie_id]
+    else:
+        # Fallback: fetch individually (for single-movie processing or cache miss)
+        headers = {'X-Plex-Token': token, 'Accept': 'application/json'}
+        try:
+            detailed_response = get_session().get(
+                f'{server}/library/metadata/{movie_id}',
+                headers=headers
+            )
+            if detailed_response.status_code == 200:
+                detailed_data = detailed_response.json()
+                if 'MediaContainer' in detailed_data and 'Metadata' in detailed_data['MediaContainer']:
+                    detailed_movie = detailed_data['MediaContainer']['Metadata'][0]
+        except Exception as e:
+            logger.warning(f"Could not fetch detailed metadata for movie {movie.get('title', 'Unknown')}: {str(e)}")
 
     movie_data = detailed_movie if detailed_movie else movie
 
@@ -312,95 +612,38 @@ def process_single_movie(
     file_path = max_size_part['file']
     file_name = os.path.basename(file_path)
 
-    tags = []
+    # Dict to store module results for template formatting
+    module_results = {}
 
-    # import modules
-    from modules.AudioChannels import get_AudioChannels
-    from modules.AudioCodec import get_AudioCodec
-    from modules.Bitrate import get_Bitrate
-    from modules.ContentRating import get_ContentRating
-    from modules.Country import get_Country
-    from modules.Cut import get_Cut
-    from modules.Director import get_Director
-    from modules.Duration import get_Duration
-    from modules.DynamicRange import get_DynamicRange
-    from modules.FrameRate import get_FrameRate
-    from modules.Genre import get_Genre
-    from modules.Language import get_Language
-    from modules.Rating import get_Rating
-    from modules.Release import get_Release
-    from modules.Resolution import get_Resolution
-    from modules.ShortFilm import get_ShortFilm
-    from modules.Size import get_Size
-    from modules.Source import get_Source
-    from modules.SpecialFeatures import get_SpecialFeatures
-    from modules.Studio import get_Studio
-    from modules.VideoCodec import get_VideoCodec
-    from modules.Writer import get_Writer
+    # Build context dict for module arguments
+    context = {
+        "movie_data": movie_data,
+        "file_name": file_name,
+        "excluded_languages": excluded_languages,
+        "skip_multiple_audio_tracks": skip_multiple_audio_tracks,
+        "tmdb_api_key": tmdb_api_key,
+    }
 
-    # run modules
+    # Run modules using registry pattern
     for module in modules:
         try:
-            if module == 'AudioChannels':
-                v = get_AudioChannels(movie_data)
-            elif module == 'AudioCodec':
-                v = get_AudioCodec(movie_data)
-            elif module == 'Bitrate':
-                v = get_Bitrate(movie_data)
-            elif module == 'ContentRating':
-                v = get_ContentRating(movie_data)
-            elif module == 'Country':
-                v = get_Country(movie_data)
-            elif module == 'Cut':
-                v = get_Cut(file_name)
-            elif module == 'Director':
-                v = get_Director(movie_data)
-            elif module == 'Duration':
-                v = get_Duration(movie_data)
-            elif module == 'DynamicRange':
-                v = get_DynamicRange(movie_data)
-            elif module == 'FrameRate':
-                v = get_FrameRate(movie_data)
-            elif module == 'Genre':
-                v = get_Genre(movie_data)
-            elif module == 'Language':
-                v = get_Language(
-                    movie_data,
-                    excluded_languages,
-                    skip_multiple_audio_tracks
-                )
-            elif module == 'Rating':
-                v = get_Rating(movie_data, tmdb_api_key)
-            elif module == 'Release':
-                v = get_Release(file_name)
-            elif module == 'Resolution':
-                v = get_Resolution(movie_data)
-            elif module == 'ShortFilm':
-                v = get_ShortFilm(movie_data)
-            elif module == 'Size':
-                v = get_Size(movie_data)
-            elif module == 'Source':
-                v = get_Source(file_name, movie_data)
-            elif module == 'SpecialFeatures':
-                v = get_SpecialFeatures(movie_data)
-            elif module == 'Studio':
-                v = get_Studio(movie_data)
-            elif module == 'VideoCodec':
-                v = get_VideoCodec(movie_data)
-            elif module == 'Writer':
-                v = get_Writer(movie_data)
-            else:
-                v = None
+            if module not in MODULE_REGISTRY:
+                logger.warning(f"Unknown module: {module}")
+                continue
+
+            func, arg_names = MODULE_REGISTRY[module]
+            args = [context[arg] for arg in arg_names]
+            v = func(*args)
 
             if v:
-                tags.append(v)
+                module_results[module] = v
 
         except Exception as e:
             logger.error(
                 f"Error processing module {module} for {movie_data.get('title', 'Unknown')}: {str(e)}"
             )
 
-    update_movie(server, token, movie_data, tags, modules)
+    update_movie(server, token, movie_data, module_results, modules)
 
 def process_movie_by_rating_key(
     server, token, rating_key, modules, excluded_languages, skip_multiple_audio_tracks, tmdb_api_key
@@ -426,10 +669,20 @@ def process_movie_by_rating_key(
 
     return True
 
-def update_movie(server, token, movie, tags, modules):
+def update_movie(server, token, movie, module_results, modules):
+    """
+    Update movie edition title in Plex.
+
+    Args:
+        server: Plex server URL
+        token: Plex auth token
+        movie: Movie metadata dict
+        module_results: Dict mapping module names to their output values
+        modules: List of enabled modules in order
+    """
     movie_id = movie['ratingKey']
     title = movie.get('title', 'Unknown')
-   
+
     clear_params = {
         'type': 1,
         'id': movie_id,
@@ -443,26 +696,32 @@ def update_movie(server, token, movie, tags, modules):
         params=clear_params
     )
 
-    tags = list(dict.fromkeys(tags))
-
-    if tags:
-        edition_title = ' · '.join(tags)
-        params = {
-            'type': 1,
-            'id': movie_id,
-            'editionTitle.value': edition_title,
-            'editionTitle.locked': 1
-        }
-
-        session.put(
-            f'{server}/library/metadata/{movie_id}',
-            headers={'X-Plex-Token': token},
-            params=params
+    if module_results:
+        # Get template settings and format the edition title
+        template_format, separator, max_length = get_template_settings()
+        edition_title = format_edition_title(
+            module_results, modules, template_format, separator, max_length
         )
-        logger.info(f'{title}: {edition_title}')
+
+        if edition_title:
+            params = {
+                'type': 1,
+                'id': movie_id,
+                'editionTitle.value': edition_title,
+                'editionTitle.locked': 1
+            }
+
+            session.put(
+                f'{server}/library/metadata/{movie_id}',
+                headers={'X-Plex-Token': token},
+                params=params
+            )
+            logger.info(f'{title}: {edition_title}')
+        else:
+            logger.info(f'{title}: Cleared edition information')
     else:
         logger.info(f'{title}: Cleared edition information')
-    
+
     return True
 
 def reset_movies(server, token, skip_libraries, max_workers, batch_size):
@@ -566,6 +825,120 @@ def prune_old_backups(keep: int = 4) -> None:
         except Exception as e:
             logger.warning(f"Could not delete old backup '{p}': {e}")
 
+
+# Undo snapshot functions - separate from manual backups
+def create_undo_snapshot(server, token) -> Path | None:
+    """
+    Create an undo snapshot before an operation.
+    This is separate from manual user backups - it's a single file
+    that gets overwritten each time to support undoing the last action.
+    """
+    headers = {'X-Plex-Token': token, 'Accept': 'application/json'}
+    try:
+        libraries = make_request(f'{server}/library/sections', headers)['MediaContainer']['Directory']
+    except Exception as e:
+        logger.warning(f"Could not create undo snapshot: {e}")
+        return None
+
+    payload = {
+        "version": "1.0",
+        "type": "undo_snapshot",
+        "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "data": {}
+    }
+
+    for lib in libraries:
+        if lib.get('type') == 'movie':
+            try:
+                response = make_request(f"{server}/library/sections/{lib['key']}/all", headers)
+                for movie in response['MediaContainer'].get('Metadata', []) or []:
+                    payload["data"][movie['ratingKey']] = {
+                        'title': movie.get('title', ''),
+                        'editionTitle': movie.get('editionTitle', '')
+                    }
+            except Exception as e:
+                logger.warning(f"Error fetching library {lib.get('title', '?')}: {e}")
+
+    UNDO_SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    # Atomic-ish write
+    tmp = UNDO_SNAPSHOT_FILE.with_suffix('.tmp')
+    try:
+        with tmp.open('w', encoding='utf-8') as f:
+            json.dump(payload, f, indent=2)
+        tmp.replace(UNDO_SNAPSHOT_FILE)
+        logger.info(f"Undo snapshot created with {len(payload['data'])} movies.")
+        return UNDO_SNAPSHOT_FILE
+    except Exception as e:
+        logger.warning(f"Could not write undo snapshot: {e}")
+        if tmp.exists():
+            tmp.unlink()
+        return None
+
+
+def get_undo_snapshot() -> Path | None:
+    """Get the undo snapshot file if it exists."""
+    if UNDO_SNAPSHOT_FILE.exists():
+        return UNDO_SNAPSHOT_FILE
+    return None
+
+
+def restore_undo_snapshot(server, token) -> bool:
+    """
+    Restore from the undo snapshot.
+    Returns True if successful, False otherwise.
+    """
+    if not UNDO_SNAPSHOT_FILE.exists():
+        logger.error("No undo snapshot available.")
+        return False
+
+    try:
+        with UNDO_SNAPSHOT_FILE.open('r', encoding='utf-8') as f:
+            metadata = json.load(f)
+    except Exception as e:
+        logger.error(f"Could not read undo snapshot: {e}")
+        return False
+
+    data = metadata.get("data", {})
+    if not data:
+        logger.error("Undo snapshot is empty.")
+        return False
+
+    items = list(data.items())
+    logger.info(f"Restoring from undo snapshot ({len(items)} movies)...")
+    _progress_set_total(len(items))
+
+    def _restore_one(pair):
+        movie_id, meta = pair
+        edition = meta.get('editionTitle', '')
+        params = {'type': 1, 'id': movie_id, 'editionTitle.value': edition, 'editionTitle.locked': 1 if edition else 0}
+        s = get_session()
+        try:
+            s.put(f'{server}/library/metadata/{movie_id}', headers={'X-Plex-Token': token}, params=params)
+        except Exception as e:
+            logger.error(f"Failed restore id={movie_id}: {e}")
+        finally:
+            _progress_step()
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futures = [ex.submit(_restore_one, p) for p in items]
+        for _ in as_completed(futures):
+            pass
+
+    logger.info("Undo restore complete.")
+    return True
+
+
+def clear_undo_snapshot() -> None:
+    """Remove the undo snapshot file."""
+    if UNDO_SNAPSHOT_FILE.exists():
+        try:
+            UNDO_SNAPSHOT_FILE.unlink()
+        except Exception as e:
+            logger.warning(f"Could not remove undo snapshot: {e}")
+
+
 # Restore metadata
 def restore_metadata(server, token, backup_file: Path | str | None):
     if backup_file is None:
@@ -621,7 +994,8 @@ def main():
         skip_multiple_audio_tracks,
         tmdb_api_key,
         max_workers,
-        batch_size
+        batch_size,
+        metadata_batch_size
     ) = initialize_settings()
     
     parser = argparse.ArgumentParser(description='Manage Plex server movie editions')
@@ -635,7 +1009,8 @@ def main():
     parser.add_argument('--restore', action='store_true', help='Restore movie metadata from backup')
     parser.add_argument('--list-backups', action='store_true', help='List available backup files')
     parser.add_argument('--restore-file', dest='restore_file', metavar='PATH', help='Restore from a specific backup file')
-    
+    parser.add_argument('--undo', action='store_true', help='Undo the last operation (restore from undo snapshot)')
+
     args = parser.parse_args()
 
     if args.one_id:
@@ -701,7 +1076,19 @@ def main():
                 print(" -", p)
         logger.info('Listed backups.')
 
+    elif args.undo:
+        # Restore from the undo snapshot
+        ok = restore_undo_snapshot(server, token)
+        if ok:
+            logger.info('Undo completed successfully.')
+        else:
+            logger.error('Undo failed - no snapshot available or restore error.')
+
     elif args.all:
+        # Create undo snapshot before processing (separate from manual backups)
+        logger.info("Creating undo snapshot before processing...")
+        create_undo_snapshot(server, token)
+
         process_movies(
             server,
             token,
@@ -711,10 +1098,15 @@ def main():
             skip_multiple_audio_tracks,
             tmdb_api_key,
             max_workers,
-            batch_size
+            batch_size,
+            metadata_batch_size
         )
 
     elif args.reset:
+        # Create undo snapshot before reset (separate from manual backups)
+        logger.info("Creating undo snapshot before reset...")
+        create_undo_snapshot(server, token)
+
         reset_movies(
             server,
             token,

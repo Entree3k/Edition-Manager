@@ -1,16 +1,17 @@
 import os
 import sys
 import re
+import json
 import configparser
 import random
 import requests
+from datetime import datetime
 from pathlib import Path
 from collections import deque
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, QProcess
 
 APP_TITLE = "🎬 Edition Manager"
-TRAY_TOOLTIP = "Edition Manager (running)"
 
 _version = "v1.9.0"
 _msg_file = Path(__file__).parent / "assets" / "messages.txt"
@@ -185,12 +186,14 @@ class SettingsDialog(QtWidgets.QDialog):
         # Prepare config
         self.cfg = configparser.ConfigParser()
         if os.path.exists(CONFIG_FILE):
-            self.cfg.read(CONFIG_FILE)
-        for sec in ("server","modules","language","rating","performance","appearance","webhook"):
+            self.cfg.read(CONFIG_FILE, encoding="utf-8")
+        for sec in ("server","modules","language","rating","performance","appearance","webhook","scheduler"):
             if not self.cfg.has_section(sec):
                 self.cfg.add_section(sec)
         if not self.cfg.has_option("webhook","enabled"):
             self.cfg.set("webhook","enabled","no")
+        if not self.cfg.has_option("scheduler","enabled"):
+            self.cfg.set("scheduler","enabled","no")
 
         # --- Server tab ---
         server = QtWidgets.QWidget(); tabs.addTab(server, "Server")
@@ -199,12 +202,46 @@ class SettingsDialog(QtWidgets.QDialog):
         self.server_address = QtWidgets.QLineEdit(self.cfg.get("server","address", fallback=""))
         self.server_token = QtWidgets.QLineEdit(self.cfg.get("server","token", fallback=""))
         self.server_token.setEchoMode(QtWidgets.QLineEdit.Password)
-        self.skip_libraries = QtWidgets.QLineEdit(self.cfg.get("server","skip_libraries", fallback=""))
+        # Store skip libraries value for later use (hidden field)
+        self._skip_libraries_value = self.cfg.get("server", "skip_libraries", fallback="")
         form.addRow("Server URL", self.server_address)
         form.addRow(QtWidgets.QLabel("e.g., http://127.0.0.1:32400"))
         form.addRow("Token", self.server_token)
-        form.addRow("Skip Libraries", self.skip_libraries)
-        form.addRow(QtWidgets.QLabel("Use semicolons to separate library names"))
+
+        # Test connection button
+        self.btn_test = QtWidgets.QPushButton("Test Connection")
+        self.btn_test.setObjectName("Primary")
+        self.btn_test.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DialogApplyButton))
+        self.btn_test.clicked.connect(self._test_connection)
+        form.addRow("", self.btn_test)
+
+        # --- Skip Libraries section ---
+        skip_group = QtWidgets.QGroupBox("Skip Libraries")
+        skip_layout = QtWidgets.QVBoxLayout(skip_group)
+        skip_layout.setContentsMargins(8, 8, 8, 8)
+        skip_layout.setSpacing(6)
+
+        skip_header = QtWidgets.QHBoxLayout()
+        skip_header.addWidget(QtWidgets.QLabel("Check movie libraries to SKIP during processing:"))
+        skip_header.addStretch(1)
+        self.btn_refresh_libs = QtWidgets.QPushButton("Refresh")
+        self.btn_refresh_libs.setObjectName("Outlined")
+        self.btn_refresh_libs.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_BrowserReload))
+        self.btn_refresh_libs.clicked.connect(self._refresh_library_list)
+        skip_header.addWidget(self.btn_refresh_libs)
+        skip_layout.addLayout(skip_header)
+
+        self.skip_libraries_list = QtWidgets.QListWidget()
+        self.skip_libraries_list.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.skip_libraries_list.setMaximumHeight(120)
+        self.skip_libraries_list.setAlternatingRowColors(True)
+        skip_layout.addWidget(self.skip_libraries_list)
+
+        self.skip_libs_status = QtWidgets.QLabel("Click 'Refresh' to load movie libraries from server")
+        self.skip_libs_status.setStyleSheet("color: gray; font-size: 9pt;")
+        skip_layout.addWidget(self.skip_libs_status)
+
+        form.addRow(skip_group)
 
         # --- Webhook enable ---
         hook_group = QtWidgets.QGroupBox("Webhook")
@@ -215,31 +252,45 @@ class SettingsDialog(QtWidgets.QDialog):
         form.addRow(hook_group)
         self._webhook_proc = None
 
-        tool_row = QtWidgets.QHBoxLayout()
-        tool_row.setContentsMargins(0,0,0,0)
-        tool_row.setSpacing(8)
-        self.btn_test = QtWidgets.QPushButton("Test Connection")
-        self.btn_test.setObjectName("Primary")
-        self.btn_test.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DialogApplyButton))
-        self.btn_pick = QtWidgets.QPushButton("Library Picker…")
-        self.btn_pick.setObjectName("Outlined")
-        self.btn_pick.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DirOpenIcon))
-        tool_row.addWidget(self.btn_test)
-        tool_row.addWidget(self.btn_pick)
-        tool_row.addStretch(1)
-        tool_wrap = QtWidgets.QWidget(); tool_wrap.setLayout(tool_row)
-        form.addRow("", tool_wrap)
-        self.btn_test.clicked.connect(self._test_connection)
-        self.btn_pick.clicked.connect(self._pick_libraries)
-
         # --- Modules tab ---
         modules_tab = QtWidgets.QWidget(); tabs.addTab(modules_tab, "Modules")
         m_v = QtWidgets.QVBoxLayout(modules_tab)
         m_v.setContentsMargins(8, 8, 8, 8)
-        m_v.addWidget(QtWidgets.QLabel("Drag to reorder. Check to enable. Enabled run top-to-bottom."))
+
+        # Template selector row
+        template_row = QtWidgets.QHBoxLayout()
+        template_row.addWidget(QtWidgets.QLabel("Load Preset:"))
+        self.template_combo = QtWidgets.QComboBox()
+        self.template_combo.setMinimumWidth(200)
+        self._load_module_templates()
+        template_row.addWidget(self.template_combo, 1)
+        self.btn_load_template = QtWidgets.QPushButton("Load")
+        self.btn_load_template.setObjectName("Primary")
+        self.btn_load_template.clicked.connect(self._load_selected_template)
+        template_row.addWidget(self.btn_load_template)
+        self.btn_delete_template = QtWidgets.QPushButton("Delete")
+        self.btn_delete_template.setObjectName("Outlined")
+        self.btn_delete_template.clicked.connect(self._delete_selected_template)
+        template_row.addWidget(self.btn_delete_template)
+        m_v.addLayout(template_row)
+
+        m_v.addSpacing(8)
+        m_v.addWidget(QtWidgets.QLabel("Drag to reorder. Check to enable. Enabled modules run top-to-bottom."))
         current_order = [m for m in re.split(r"[;]", self.cfg.get("modules","order", fallback="")) if m]
         self.modules_list = ModulesList(DEFAULT_MODULES, current_order)
         m_v.addWidget(self.modules_list, 1)
+
+        # Save template row
+        save_row = QtWidgets.QHBoxLayout()
+        save_row.addWidget(QtWidgets.QLabel("Save current selection as preset:"))
+        self.template_name_edit = QtWidgets.QLineEdit()
+        self.template_name_edit.setPlaceholderText("Enter preset name...")
+        save_row.addWidget(self.template_name_edit, 1)
+        self.btn_save_template = QtWidgets.QPushButton("Save Preset")
+        self.btn_save_template.setObjectName("Primary")
+        self.btn_save_template.clicked.connect(self._save_module_template)
+        save_row.addWidget(self.btn_save_template)
+        m_v.addLayout(save_row)
 
         # --- Language tab ---
         lang_tab = QtWidgets.QWidget(); tabs.addTab(lang_tab, "Language")
@@ -261,11 +312,18 @@ class SettingsDialog(QtWidgets.QDialog):
         src_layout.setContentsMargins(0,0,0,0); src_layout.setSpacing(12)
         self.src_imdb = QtWidgets.QRadioButton("IMDB")
         self.src_rt   = QtWidgets.QRadioButton("Rotten Tomatoes")
+        self.src_letterboxd = QtWidgets.QRadioButton("Letterboxd")
         src_layout.addWidget(self.src_imdb)
         src_layout.addWidget(self.src_rt)
+        src_layout.addWidget(self.src_letterboxd)
         src_layout.addStretch(1)
         _src_val = self.cfg.get("rating","source", fallback="imdb").strip().lower()
-        (self.src_imdb if _src_val == "imdb" else self.src_rt).setChecked(True)
+        if _src_val == "letterboxd":
+            self.src_letterboxd.setChecked(True)
+        elif _src_val == "rotten_tomatoes":
+            self.src_rt.setChecked(True)
+        else:
+            self.src_imdb.setChecked(True)
         rf.addRow("Rating Source", src_box)
 
         rt_box = QtWidgets.QWidget(); rt_layout = QtWidgets.QHBoxLayout(rt_box)
@@ -278,7 +336,8 @@ class SettingsDialog(QtWidgets.QDialog):
         _rt_val = self.cfg.get("rating","rotten_tomatoes_type", fallback="critic").strip().lower()
         (self.rt_critics if _rt_val == "critic" else self.rt_audience).setChecked(True)
         rf.addRow("Rotten Tomatoes Type", rt_box)
-        rf.addRow(QtWidgets.QLabel("Rotten Tomatoes type is used only when the source is Rotten Tomatoes."))
+        rf.addRow(QtWidgets.QLabel("Rotten Tomatoes type is used only when the source is Rotten Tomatoes.\n"
+                                    "Letterboxd ratings are displayed as 'X.X/5' (out of 5 stars)."))
 
         # TMDb API Key
         self.tmdb_key = QtWidgets.QLineEdit(self.cfg.get("rating", "tmdb_api_key", fallback=""))
@@ -344,6 +403,47 @@ class SettingsDialog(QtWidgets.QDialog):
         af.addRow("", self.dark_mode_chk)
         self.cfg.set("appearance", "primary_color", self.primary_color_display.text().strip())
         self.cfg.set("appearance", "dark_mode", "yes" if self.dark_mode_chk.isChecked() else "no")
+
+        # --- Scheduler tab ---
+        scheduler_tab = QtWidgets.QWidget(); tabs.addTab(scheduler_tab, "Scheduler")
+        sf = QtWidgets.QFormLayout(scheduler_tab)
+        sf.setHorizontalSpacing(14); sf.setVerticalSpacing(10)
+
+        self.scheduler_enabled = QtWidgets.QCheckBox("Enable scheduled processing")
+        self.scheduler_enabled.setChecked(self.cfg.get("scheduler","enabled",fallback="no").lower() in ("1","true","yes","on"))
+        sf.addRow("", self.scheduler_enabled)
+
+        # Cron expression input
+        self.scheduler_cron = QtWidgets.QLineEdit(self.cfg.get("scheduler","cron", fallback="0 3 * * *"))
+        self.scheduler_cron.setPlaceholderText("0 3 * * *")
+        sf.addRow("Cron Schedule", self.scheduler_cron)
+
+        # Cron help label
+        cron_help = QtWidgets.QLabel(
+            "Format: minute hour day month weekday\n"
+            "Examples:\n"
+            "  0 3 * * *    = Daily at 3:00 AM\n"
+            "  0 */6 * * *  = Every 6 hours\n"
+            "  0 0 * * 0    = Weekly on Sunday at midnight\n"
+            "  30 2 * * 1-5 = Weekdays at 2:30 AM"
+        )
+        cron_help.setStyleSheet("color: gray; font-size: 9pt;")
+        sf.addRow("", cron_help)
+
+        last_run = self.cfg.get("scheduler","last_run", fallback="")
+        self.scheduler_last_run = QtWidgets.QLabel(last_run if last_run else "Never")
+        sf.addRow("Last run", self.scheduler_last_run)
+
+        sf.addRow(QtWidgets.QLabel(
+            "When enabled, Edition Manager will automatically process\n"
+            "all movies at the specified schedule while the GUI is open."
+        ))
+
+        # Hidden fields to maintain config compatibility (no longer in UI)
+        self.template_format = QtWidgets.QLineEdit("auto")
+        self.template_separator = QtWidgets.QLineEdit(self.cfg.get("template","separator", fallback=" · "))
+        self.template_max_length = QtWidgets.QSpinBox()
+        self.template_max_length.setValue(int(self.cfg.get("template","max_length", fallback="0")))
 
         # Footer buttons
         btn_box = QtWidgets.QDialogButtonBox()
@@ -451,20 +551,169 @@ class SettingsDialog(QtWidgets.QDialog):
         # Auto-hide
         QtCore.QTimer.singleShot(2200, self._banner.hide)
 
+    def _get_templates_file(self):
+        return Path(CONFIG_FILE).parent / "module_presets.json"
+
+    def _load_module_templates(self):
+        """Load saved module presets into the combo box."""
+        self.template_combo.clear()
+        self.template_combo.addItem("-- Select a preset --", userData=None)
+
+        # Add built-in presets
+        builtin_presets = {
+            "Default": ["Cut", "Release"],
+        }
+        for name, modules in builtin_presets.items():
+            self.template_combo.addItem(f"{name} (Built-in)", userData={"name": name, "modules": modules, "builtin": True})
+
+        # Load user presets from file
+        templates_file = self._get_templates_file()
+        if templates_file.exists():
+            try:
+                with open(templates_file, 'r', encoding='utf-8') as f:
+                    user_presets = json.load(f)
+                for name, modules in user_presets.items():
+                    self.template_combo.addItem(name, userData={"name": name, "modules": modules, "builtin": False})
+            except Exception:
+                pass
+
+    def _save_module_template(self):
+        """Save current module selection as a new preset."""
+        name = self.template_name_edit.text().strip()
+        if not name:
+            self._show_banner("Please enter a preset name", ok=False)
+            return
+
+        # Get current module selection
+        modules = self.modules_list.enabled_modules_in_order()
+        if not modules:
+            self._show_banner("No modules selected", ok=False)
+            return
+
+        # Load existing presets
+        templates_file = self._get_templates_file()
+        user_presets = {}
+        if templates_file.exists():
+            try:
+                with open(templates_file, 'r', encoding='utf-8') as f:
+                    user_presets = json.load(f)
+            except Exception:
+                pass
+
+        # Add/update preset
+        user_presets[name] = modules
+
+        # Save to file
+        try:
+            templates_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(templates_file, 'w', encoding='utf-8') as f:
+                json.dump(user_presets, f, indent=2)
+            self._show_banner(f"Preset '{name}' saved", ok=True)
+            self.template_name_edit.clear()
+            self._load_module_templates()  # Refresh combo box
+        except Exception as e:
+            self._show_banner(f"Failed to save preset: {e}", ok=False)
+
+    def _load_selected_template(self):
+        """Load the selected preset into the modules list."""
+        data = self.template_combo.currentData()
+        if not data:
+            return
+
+        modules = data.get("modules", [])
+        if not modules:
+            return
+
+        # Update the modules list
+        for i in range(self.modules_list.count()):
+            item = self.modules_list.item(i)
+            if item.text() in modules:
+                item.setCheckState(Qt.Checked)
+            else:
+                item.setCheckState(Qt.Unchecked)
+
+        # Reorder to match template order
+        # First, collect all items
+        items_data = []
+        for i in range(self.modules_list.count()):
+            item = self.modules_list.item(i)
+            items_data.append((item.text(), item.checkState()))
+
+        # Sort: enabled modules in template order first, then disabled
+        def sort_key(item_tuple):
+            name, state = item_tuple
+            if name in modules:
+                return (0, modules.index(name))
+            else:
+                return (1, DEFAULT_MODULES.index(name) if name in DEFAULT_MODULES else 999)
+
+        items_data.sort(key=sort_key)
+
+        # Rebuild the list
+        self.modules_list.clear()
+        for name, state in items_data:
+            it = QtWidgets.QListWidgetItem(name, self.modules_list)
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDragEnabled | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            it.setCheckState(state)
+
+        self._show_banner(f"Preset '{data.get('name')}' loaded", ok=True)
+
+    def _delete_selected_template(self):
+        """Delete the selected user preset."""
+        data = self.template_combo.currentData()
+        if not data:
+            return
+
+        if data.get("builtin", False):
+            self._show_banner("Cannot delete built-in presets", ok=False)
+            return
+
+        name = data.get("name")
+
+        # Load existing presets
+        templates_file = self._get_templates_file()
+        if not templates_file.exists():
+            return
+
+        try:
+            with open(templates_file, 'r', encoding='utf-8') as f:
+                user_presets = json.load(f)
+
+            if name in user_presets:
+                del user_presets[name]
+                with open(templates_file, 'w', encoding='utf-8') as f:
+                    json.dump(user_presets, f, indent=2)
+                self._show_banner(f"Preset '{name}' deleted", ok=True)
+                self._load_module_templates()  # Refresh combo box
+        except Exception as e:
+            self._show_banner(f"Failed to delete preset: {e}", ok=False)
+
     @QtCore.Slot()
     def _test_connection(self):
-        import requests
         try:
             r = requests.get(self._server_base() + "/library/sections", headers=self._plex_headers(), timeout=8)
             r.raise_for_status()
-            libs = [d.get("title") for d in r.json().get("MediaContainer", {}).get("Directory", [])]
-            self._show_banner("Connection Successful", ok=True)
+            self._show_banner("Connection successful!", ok=True)
+        except requests.exceptions.Timeout:
+            self._show_banner("Connection timed out", ok=False)
+        except requests.exceptions.ConnectionError:
+            self._show_banner("Could not connect to server", ok=False)
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 401:
+                self._show_banner("Invalid token (401 Unauthorized)", ok=False)
+            else:
+                self._show_banner(f"HTTP error: {e.response.status_code if e.response else 'Unknown'}", ok=False)
         except Exception as e:
-            self._show_banner("Connection Unsuccessful", ok=False)
+            self._show_banner(f"Error: {type(e).__name__}", ok=False)
 
     @QtCore.Slot()
-    def _pick_libraries(self):
-        import requests
+    def _refresh_library_list(self):
+        """Fetch movie libraries from server and populate the skip list."""
+        self.skip_libraries_list.clear()
+        self.skip_libs_status.setText("Connecting to server...")
+        self.skip_libs_status.setStyleSheet("color: gray; font-size: 9pt;")
+        QtWidgets.QApplication.processEvents()
+
         try:
             r = requests.get(
                 self._server_base() + "/library/sections",
@@ -476,39 +725,55 @@ class SettingsDialog(QtWidgets.QDialog):
                 d for d in r.json().get("MediaContainer", {}).get("Directory", [])
                 if d.get("type") == "movie"
             ]
+        except requests.exceptions.Timeout:
+            self.skip_libs_status.setText("Connection timed out")
+            self.skip_libs_status.setStyleSheet("color: #D93025; font-size: 9pt;")
+            return
+        except requests.exceptions.ConnectionError:
+            self.skip_libs_status.setText("Could not connect to server")
+            self.skip_libs_status.setStyleSheet("color: #D93025; font-size: 9pt;")
+            return
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 401:
+                self.skip_libs_status.setText("Invalid token (401 Unauthorized)")
+            else:
+                self.skip_libs_status.setText(f"HTTP error: {e.response.status_code if e.response else 'Unknown'}")
+            self.skip_libs_status.setStyleSheet("color: #D93025; font-size: 9pt;")
+            return
         except Exception as e:
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Error",
-                f"Could not fetch libraries:\n{e}"
-            )
+            self.skip_libs_status.setText(f"Error: {type(e).__name__}")
+            self.skip_libs_status.setStyleSheet("color: #D93025; font-size: 9pt;")
             return
 
-        dlg = QtWidgets.QDialog(self)
-        dlg.setWindowTitle("Pick movie libraries to SKIP")
-        v = QtWidgets.QVBoxLayout(dlg)
-        v.addWidget(QtWidgets.QLabel("Checked libraries will be SKIPPED by the CLI."))
-        listw = QtWidgets.QListWidget()
-        listw.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
-        skip_now = {s.strip() for s in self.skip_libraries.text().split(";") if s.strip()}
-        for d in dirs:
-            it = QtWidgets.QListWidgetItem(d.get("title", ""))
-            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
-            it.setCheckState(Qt.Checked if d.get("title") in skip_now else Qt.Unchecked)
-            listw.addItem(it)
-        v.addWidget(listw)
-        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-        v.addWidget(bb)
-        bb.accepted.connect(dlg.accept)
-        bb.rejected.connect(dlg.reject)
+        if not dirs:
+            self.skip_libs_status.setText("No movie libraries found on server")
+            self.skip_libs_status.setStyleSheet("color: gray; font-size: 9pt;")
+            return
 
-        if dlg.exec() == QtWidgets.QDialog.Accepted:
-            chosen = []
-            for i in range(listw.count()):
-                it = listw.item(i)
-                if it.checkState() == Qt.Checked:
-                    chosen.append(it.text())
-            self.skip_libraries.setText(";".join(chosen))
+        # Get currently skipped libraries
+        skip_now = {s.strip() for s in self._skip_libraries_value.split(";") if s.strip()}
+
+        for d in dirs:
+            title = d.get("title", "")
+            if not title:
+                continue
+            it = QtWidgets.QListWidgetItem(title)
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Checked if title in skip_now else Qt.Unchecked)
+            self.skip_libraries_list.addItem(it)
+
+        lib_count = len(dirs)
+        self.skip_libs_status.setText(f"Found {lib_count} movie librar{'y' if lib_count == 1 else 'ies'}")
+        self.skip_libs_status.setStyleSheet("color: #1E8E3E; font-size: 9pt;")
+
+    def _get_skip_libraries_from_list(self) -> str:
+        """Get semicolon-separated list of checked (skipped) libraries."""
+        skipped = []
+        for i in range(self.skip_libraries_list.count()):
+            it = self.skip_libraries_list.item(i)
+            if it.checkState() == Qt.Checked:
+                skipped.append(it.text())
+        return ";".join(skipped)
 
     def choose_primary_color(self):
         color = QtWidgets.QColorDialog.getColor(QtGui.QColor(self.primary_color_display.text()), self, "Select Primary Color")
@@ -519,20 +784,30 @@ class SettingsDialog(QtWidgets.QDialog):
                 f"background-color: {hex_color}; border: 1px solid #CAC4D0; border-radius: 6px; padding: 6px;")
 
     def on_save(self):
-        for sec in ("server","modules","language","rating","performance","appearance"):
+        for sec in ("server","modules","language","rating","performance","appearance","scheduler","template"):
             if not self.cfg.has_section(sec):
                 self.cfg.add_section(sec)
         # server
         self.cfg.set("server", "address", self.server_address.text().strip())
         self.cfg.set("server", "token", self.server_token.text().strip())
-        self.cfg.set("server", "skip_libraries", self.skip_libraries.text().strip())
+        # Get skip libraries from list if populated, otherwise keep existing value
+        if self.skip_libraries_list.count() > 0:
+            skip_libs = self._get_skip_libraries_from_list()
+        else:
+            skip_libs = self._skip_libraries_value
+        self.cfg.set("server", "skip_libraries", skip_libs)
         # modules
         self.cfg.set("modules", "order", ";".join(self.modules_list.enabled_modules_in_order()))
         # language
         self.cfg.set("language", "excluded_languages", self.excluded_languages.text().strip())
         self.cfg.set("language", "skip_multiple_audio_tracks", "yes" if self.skip_multiple.isChecked() else "no")
         # rating
-        src_val = "imdb" if self.src_imdb.isChecked() else "rotten_tomatoes"
+        if self.src_letterboxd.isChecked():
+            src_val = "letterboxd"
+        elif self.src_rt.isChecked():
+            src_val = "rotten_tomatoes"
+        else:
+            src_val = "imdb"
         rt_val = "critic" if self.rt_critics.isChecked() else "audience"
         self.cfg.set("rating", "source", src_val)
         self.cfg.set("rating", "rotten_tomatoes_type", rt_val)
@@ -543,11 +818,18 @@ class SettingsDialog(QtWidgets.QDialog):
         # appearance
         self.cfg.set("appearance", "primary_color", self.primary_color_display.text().strip())
         self.cfg.set("appearance", "dark_mode", "yes" if self.dark_mode_chk.isChecked() else "no")
+        # scheduler (now with cron)
+        self.cfg.set("scheduler", "enabled", "yes" if self.scheduler_enabled.isChecked() else "no")
+        self.cfg.set("scheduler", "cron", self.scheduler_cron.text().strip() or "0 3 * * *")
+        # template
+        self.cfg.set("template", "format", self.template_format.text().strip() or "auto")
+        self.cfg.set("template", "separator", self.template_separator.text() or " · ")
+        self.cfg.set("template", "max_length", str(self.template_max_length.value()))
 
         cfg_dir = Path(CONFIG_FILE).parent
         cfg_dir.mkdir(parents=True, exist_ok=True)
         self.cfg.set("webhook","enabled", "yes" if self.webhook_enabled.isChecked() else "no")
-        
+
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             self.cfg.write(f)
         self.accept()
@@ -629,8 +911,10 @@ class SearchDialog(QtWidgets.QDialog):
             icon = QtGui.QIcon()
             if thumb:
                 try:
-                    url = f"{self._server}{thumb}?X-Plex-Token={self._token}"
-                    img = requests.get(url, timeout=10).content
+                    url = f"{self._server}{thumb}"
+                    # Use headers for token authentication instead of URL parameter
+                    headers = {"X-Plex-Token": self._token}
+                    img = requests.get(url, headers=headers, timeout=10).content
                     pm = QtGui.QPixmap()
                     pm.loadFromData(img)
                     icon = QtGui.QIcon(pm)
@@ -655,7 +939,7 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.cfg = configparser.ConfigParser()
         if os.path.exists(CONFIG_FILE):
-            self.cfg.read(CONFIG_FILE)
+            self.cfg.read(CONFIG_FILE, encoding="utf-8")
         self.primary_color = self.cfg.get("appearance", "primary_color", fallback="#6750A4")
         self.dark_mode = self.cfg.getboolean("appearance", "dark_mode", fallback=False)
 
@@ -699,15 +983,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_backup = QtWidgets.QPushButton("Backup Editions"); self.btn_backup.setObjectName("Outlined")
         self.btn_restore = QtWidgets.QPushButton("Restore Editions"); self.btn_restore.setObjectName("Outlined")
         self.btn_restore_file = QtWidgets.QPushButton("Restore from file…"); self.btn_restore_file.setObjectName("Outlined")
+        self.btn_undo = QtWidgets.QPushButton("Undo Last"); self.btn_undo.setObjectName("Outlined")
         self.btn_settings = QtWidgets.QPushButton("Settings"); self.btn_settings.setObjectName("Outlined")
 
         ag.addWidget(self.btn_all,    0, 0)
         ag.addWidget(self.btn_one,    0, 1)
-        ag.addWidget(self.btn_reset,  1, 0)
         ag.addWidget(self.btn_backup, 0, 2)
-        ag.addWidget(self.btn_restore,1, 2)
+        ag.addWidget(self.btn_settings, 0, 3)
+        ag.addWidget(self.btn_reset,  1, 0)
         ag.addWidget(self.btn_restore_file, 1, 1)
-        ag.addWidget(self.btn_settings,0,3)
+        ag.addWidget(self.btn_restore, 1, 2)
+        ag.addWidget(self.btn_undo, 1, 3)
         root.addWidget(actions_group)
 
         # ---- Section: Progress ----
@@ -729,6 +1015,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status = QtWidgets.QPlainTextEdit(); self.status.setReadOnly(True); self.status.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
         mono = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont); mono.setPointSize(10)
         self.status.setFont(mono)
+        self._status_max_lines = 1000  # Maximum lines to keep in status log
         sg.addWidget(self.status, 0, 0, 1, 1)
 
         # --- Status buttons row ---
@@ -762,10 +1049,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_settings.clicked.connect(self.open_settings)
         self.btn_one.clicked.connect(self.open_search)
         self.btn_all.clicked.connect(lambda: self.run_flag("--all"))
-        self.btn_reset.clicked.connect(lambda: self.run_flag("--reset"))
+        self.btn_reset.clicked.connect(self._confirm_reset)
         self.btn_backup.clicked.connect(lambda: self.run_flag("--backup"))
         self.btn_restore.clicked.connect(lambda: self.run_flag("--restore"))
         self.btn_restore_file.clicked.connect(self._restore_from_file)
+        self.btn_undo.clicked.connect(self._undo_last_operation)
         self.btn_cancel.clicked.connect(self.cancel_current_operation)
 
         # Timer to update percent label
@@ -778,11 +1066,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_styles()
         self._apply_webhook_state()
 
-        # --- System tray support ---
-        self._should_exit = False
-        self._init_tray()
-        # Optional: show tray icon immediately so "Minimize to Taskbar" has a target
-        # self.tray.show()
+        # Setup system tray
+        self._setup_system_tray()
+
+        # Scheduler timer - checks every minute if it's time to run
+        self._scheduler_timer = QtCore.QTimer(self)
+        self._scheduler_timer.timeout.connect(self._check_scheduler)
+        self._scheduler_timer.start(60000)  # Check every minute
+        QtCore.QTimer.singleShot(5000, self._check_scheduler)  # Initial check after 5 seconds
 
     def cancel_current_operation(self):
         """Cancel the currently running background process."""
@@ -796,6 +1087,20 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.append_status("No active operation to cancel.")
 
+    def _confirm_reset(self):
+        """Show confirmation dialog before resetting all movies."""
+        reply = QtWidgets.QMessageBox.warning(
+            self,
+            "Confirm Reset",
+            "This will remove ALL edition tags from your movies.\n\n"
+            "This action cannot be undone unless you have a backup.\n\n"
+            "Are you sure you want to continue?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No
+        )
+        if reply == QtWidgets.QMessageBox.Yes:
+            self.run_flag("--reset")
+
     def open_search(self):
         dlg = SearchDialog(self._cfg_server_base(), self._cfg_token(), self)
         if dlg.exec() == QtWidgets.QDialog.Accepted:
@@ -804,16 +1109,138 @@ class MainWindow(QtWidgets.QMainWindow):
                 # run the CLI for exactly one movie
                 self.run_flag(f"--one-id={rk}")
 
+    def _reload_config(self):
+        """Reload config from file. Call this before reading config values."""
+        if os.path.exists(CONFIG_FILE):
+            self.cfg.read(CONFIG_FILE, encoding="utf-8")
+
     def _cfg_server_base(self):
-        self.cfg.read(CONFIG_FILE)
-        return self.cfg.get("server","address", fallback="").strip().rstrip("/")
+        self._reload_config()
+        return self.cfg.get("server", "address", fallback="").strip().rstrip("/")
 
     def _cfg_token(self):
-        self.cfg.read(CONFIG_FILE)
-        return self.cfg.get("server","token", fallback="").strip()
+        self._reload_config()
+        return self.cfg.get("server", "token", fallback="").strip()
 
     def _plex_headers(self):
         return {"X-Plex-Token": self._cfg_token(), "Accept": "application/json"}
+
+    # ---- Scheduler helpers ----
+    def _scheduler_enabled_in_cfg(self) -> bool:
+        self._reload_config()
+        return self.cfg.get("scheduler", "enabled", fallback="no").lower() in ("1", "true", "yes", "on")
+
+    def _scheduler_cron(self) -> str:
+        self._reload_config()
+        return self.cfg.get("scheduler", "cron", fallback="0 3 * * *")
+
+    def _scheduler_last_run(self) -> str:
+        self._reload_config()
+        return self.cfg.get("scheduler", "last_run", fallback="")
+
+    def _scheduler_update_last_run(self):
+        """Update the last_run timestamp in config."""
+        self._reload_config()
+        if not self.cfg.has_section("scheduler"):
+            self.cfg.add_section("scheduler")
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.cfg.set("scheduler", "last_run", timestamp)
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            self.cfg.write(f)
+
+    def _parse_cron_field(self, field: str, min_val: int, max_val: int, current: int) -> bool:
+        """Check if current value matches a cron field."""
+        if field == "*":
+            return True
+
+        # Handle */n (every n)
+        if field.startswith("*/"):
+            try:
+                step = int(field[2:])
+                return current % step == 0
+            except ValueError:
+                return False
+
+        # Handle ranges like 1-5
+        if "-" in field and "/" not in field:
+            try:
+                start, end = field.split("-")
+                return int(start) <= current <= int(end)
+            except ValueError:
+                return False
+
+        # Handle lists like 1,3,5
+        if "," in field:
+            try:
+                values = [int(v.strip()) for v in field.split(",")]
+                return current in values
+            except ValueError:
+                return False
+
+        # Handle single value
+        try:
+            return int(field) == current
+        except ValueError:
+            return False
+
+    def _cron_matches_now(self, cron_expr: str) -> bool:
+        """Check if current time matches cron expression (minute hour day month weekday)."""
+        now = datetime.now()
+
+        parts = cron_expr.strip().split()
+        if len(parts) != 5:
+            return False
+
+        minute, hour, day, month, weekday = parts
+
+        # weekday: 0=Sunday in cron, but Python uses 0=Monday
+        # Convert Python weekday (0=Mon) to cron weekday (0=Sun)
+        py_weekday = now.weekday()  # 0=Monday
+        cron_weekday = (py_weekday + 1) % 7  # Convert to 0=Sunday
+
+        return (
+            self._parse_cron_field(minute, 0, 59, now.minute) and
+            self._parse_cron_field(hour, 0, 23, now.hour) and
+            self._parse_cron_field(day, 1, 31, now.day) and
+            self._parse_cron_field(month, 1, 12, now.month) and
+            self._parse_cron_field(weekday, 0, 6, cron_weekday)
+        )
+
+    @QtCore.Slot()
+    def _check_scheduler(self):
+        """Check if scheduled processing should run based on cron expression."""
+        if not self._scheduler_enabled_in_cfg():
+            return
+
+        # Don't start if already processing
+        if self._current_worker is not None:
+            return
+
+        cron_expr = self._scheduler_cron()
+
+        # Check if current time matches cron expression
+        if not self._cron_matches_now(cron_expr):
+            return
+
+        # Check if we already ran this minute (to avoid multiple runs)
+        last_run_str = self._scheduler_last_run()
+        if last_run_str:
+            try:
+                last_run = datetime.strptime(last_run_str, "%Y-%m-%d %H:%M:%S")
+                now = datetime.now()
+                # If last run was within the same minute, skip
+                if (last_run.year == now.year and
+                    last_run.month == now.month and
+                    last_run.day == now.day and
+                    last_run.hour == now.hour and
+                    last_run.minute == now.minute):
+                    return
+            except ValueError:
+                pass  # Invalid timestamp, proceed with run
+
+        self.append_status(f"[Scheduler] Starting scheduled processing (cron: {cron_expr})...")
+        self._scheduler_update_last_run()
+        self.run_flag("--all")
 
     # ---- Styling helpers ----
     def _add_shadow(self, widget, radius=18, opacity=0.20, offset=(0, 4)):
@@ -922,7 +1349,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if result == QtWidgets.QDialog.Accepted:
             # Re-read saved settings and apply
-            self.cfg.read(CONFIG_FILE)
+            self.cfg.read(CONFIG_FILE, encoding="utf-8")
             self.primary_color = self.cfg.get("appearance", "primary_color", fallback=self.primary_color)
             self.dark_mode     = self.cfg.getboolean("appearance", "dark_mode", fallback=self.dark_mode)
 
@@ -982,18 +1409,29 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot(str)
     def append_status(self, text: str):
         self.status.appendPlainText(text)
+        # Prune old lines if exceeding max limit to prevent memory leak
+        doc = self.status.document()
+        if doc.blockCount() > self._status_max_lines:
+            cursor = QtGui.QTextCursor(doc)
+            cursor.movePosition(QtGui.QTextCursor.Start)
+            # Remove oldest lines (keep removing until under limit)
+            lines_to_remove = doc.blockCount() - self._status_max_lines
+            for _ in range(lines_to_remove):
+                cursor.select(QtGui.QTextCursor.BlockUnderCursor)
+                cursor.removeSelectedText()
+                cursor.deleteChar()  # Remove the newline
         self.status.verticalScrollBar().setValue(self.status.verticalScrollBar().maximum())
 
     def _set_buttons_enabled(self, enabled: bool):
-        for b in (self.btn_one, self.btn_all, self.btn_reset, self.btn_backup, self.btn_restore, self.btn_restore_file, self.btn_settings):
+        for b in (self.btn_one, self.btn_all, self.btn_reset, self.btn_backup, self.btn_restore, self.btn_restore_file, self.btn_undo, self.btn_settings):
             b.setEnabled(enabled)
 
     def _webhook_cmd(self):
         return [sys.executable, str(Path(__file__).parent / "webhook_server.py")]
 
     def _webhook_enabled_in_cfg(self) -> bool:
-        self.cfg.read(CONFIG_FILE)
-        return self.cfg.get("webhook","enabled", fallback="no").lower() in ("1","true","yes","on")
+        self._reload_config()
+        return self.cfg.get("webhook", "enabled", fallback="no").lower() in ("1", "true", "yes", "on")
 
     def _apply_webhook_state(self):
         if self._webhook_enabled_in_cfg():
@@ -1004,9 +1442,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _init_webhook_log_filter(self):
         if getattr(self, "_webhook_filter_ready", False):
             return
-
-        import re
-        from collections import deque
 
         # Patterns to ignore in the GUI
         self._webhook_drop_patterns = [
@@ -1089,6 +1524,108 @@ class MainWindow(QtWidgets.QMainWindow):
                 # call CLI with explicit file path
                 self.run_flag(f"--restore-file={path}")
 
+    def _undo_last_operation(self):
+        """Undo the last operation by restoring from the undo snapshot."""
+        undo_snapshot = Path(__file__).parent / "metadata_backup" / ".undo_snapshot.json"
+
+        if not undo_snapshot.exists():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "No Undo Available",
+                "No undo snapshot available.\n\n"
+                "An undo snapshot is created automatically before\n"
+                "each 'Process All' or 'Reset All' operation."
+            )
+            return
+
+        # Get timestamp from the snapshot file
+        try:
+            import json
+            with open(undo_snapshot, 'r', encoding='utf-8') as f:
+                snapshot_data = json.load(f)
+            created_at = snapshot_data.get('created_at', 'Unknown time')
+            movie_count = len(snapshot_data.get('data', {}))
+        except Exception:
+            created_at = 'Unknown time'
+            movie_count = 0
+
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Confirm Undo",
+            f"Undo the last operation?\n\n"
+            f"Snapshot created: {created_at}\n"
+            f"Movies to restore: {movie_count}\n\n"
+            f"This will revert all edition titles to their state\n"
+            f"before the last 'Process All' or 'Reset All' operation.",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No
+        )
+
+        if reply == QtWidgets.QMessageBox.Yes:
+            self.append_status("Restoring from undo snapshot...")
+            self.run_flag("--undo")
+
+    # ---- System Tray ----
+    def _setup_system_tray(self):
+        """Setup system tray icon and menu."""
+        if not QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
+            self._tray_icon = None
+            return
+
+        self._tray_icon = QtWidgets.QSystemTrayIcon(self)
+
+        # Set icon
+        icon_path = Path(__file__).parent / "assets" / "icon.png"
+        if icon_path.exists():
+            self._tray_icon.setIcon(QtGui.QIcon(str(icon_path)))
+        else:
+            self._tray_icon.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_MediaPlay))
+
+        self._tray_icon.setToolTip(APP_TITLE)
+
+        # Create tray menu
+        tray_menu = QtWidgets.QMenu()
+
+        action_show = tray_menu.addAction("Show Window")
+        action_show.triggered.connect(self._tray_show_window)
+
+        tray_menu.addSeparator()
+
+        action_process = tray_menu.addAction("Process All Movies")
+        action_process.triggered.connect(lambda: self.run_flag("--all"))
+
+        action_backup = tray_menu.addAction("Backup Editions")
+        action_backup.triggered.connect(lambda: self.run_flag("--backup"))
+
+        tray_menu.addSeparator()
+
+        action_quit = tray_menu.addAction("Quit")
+        action_quit.triggered.connect(self._tray_quit)
+
+        self._tray_icon.setContextMenu(tray_menu)
+
+        # Double-click to show window
+        self._tray_icon.activated.connect(self._tray_activated)
+
+        self._tray_icon.show()
+
+    @QtCore.Slot(QtWidgets.QSystemTrayIcon.ActivationReason)
+    def _tray_activated(self, reason):
+        """Handle tray icon activation (double-click)."""
+        if reason == QtWidgets.QSystemTrayIcon.DoubleClick:
+            self._tray_show_window()
+
+    def _tray_show_window(self):
+        """Show and raise the main window."""
+        self.showNormal()
+        self.activateWindow()
+        self.raise_()
+
+    def _tray_quit(self):
+        """Quit the application from tray."""
+        self._force_quit = True
+        self.close()
+
     @QtCore.Slot(int, QtCore.QProcess.ExitStatus)
     def _on_webhook_finished(self, code: int, _status):
         self.append_status(f"Webhook server stopped (exit={code}).")
@@ -1101,98 +1638,79 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._webhook_proc.waitForFinished(2000)
         self._webhook_proc = None
 
-    def closeEvent(self, e: QtGui.QCloseEvent):
-        # ensures webhook dies with the GUI
-        try:
-            self._stop_webhook()
-        finally:
-            super().closeEvent(e)
-
-    def _init_tray(self):
-        self.tray = QtWidgets.QSystemTrayIcon(self)
-        # Use existing app icon if available
-        self.tray.setIcon(self.windowIcon() or self.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon))
-        self.tray.setToolTip(TRAY_TOOLTIP)
-
-        # Context menu
-        menu = QtWidgets.QMenu()
-        act_open = menu.addAction("Open Edition Manager")
-        act_open.triggered.connect(self._restore_from_tray)
-        menu.addSeparator()
-        act_exit = menu.addAction("Exit")
-        act_exit.triggered.connect(self._quit_from_tray)
-        self.tray.setContextMenu(menu)
-
-        # Double-click restores window
-        self.tray.activated.connect(self._on_tray_activated)
-
-    @QtCore.Slot(QtWidgets.QSystemTrayIcon.ActivationReason)
-    def _on_tray_activated(self, reason):
-        if reason in (QtWidgets.QSystemTrayIcon.Trigger, QtWidgets.QSystemTrayIcon.DoubleClick):
-            self._restore_from_tray()
-
-    def _restore_from_tray(self):
-        if not self.isVisible():
-            self.show()
-        self.setWindowState(self.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
-        self.raise_()
-        self.activateWindow()
-
-    def _quit_from_tray(self):
-        self._should_exit = True
-        self._stop_webhook()
-        QtWidgets.QApplication.instance().quit()
-
-    def _minimize_to_tray(self):
-        if not self.tray.isVisible():
-            self.tray.show()
-            try:
-                self.tray.showMessage("Edition Manager", "Minimized to system tray. Right-click the icon to exit.", QtWidgets.QSystemTrayIcon.Information, 3000)
-            except Exception:
-                pass
-        self.hide()
-        self.append_status("Minimized to system tray…")
+    def changeEvent(self, event: QtCore.QEvent):
+        """Handle window state changes (minimize to tray)."""
+        if event.type() == QtCore.QEvent.WindowStateChange:
+            if self.windowState() & QtCore.Qt.WindowMinimized:
+                if self._tray_icon and self._tray_icon.isVisible():
+                    # Minimize to tray
+                    QtCore.QTimer.singleShot(0, self.hide)
+                    self._tray_icon.showMessage(
+                        APP_TITLE,
+                        "Minimized to system tray. Scheduler continues running.",
+                        QtWidgets.QSystemTrayIcon.Information,
+                        2000
+                    )
+        super().changeEvent(event)
 
     def closeEvent(self, e: QtGui.QCloseEvent):
-        # If we've already decided to exit (tray Exit or button flow), just stop webhook and close.
-        if self._should_exit:
+        """Handle window close - ask user whether to quit or minimize to tray."""
+        # If force quit from tray menu, actually quit
+        if getattr(self, '_force_quit', False):
             try:
                 self._stop_webhook()
+                if self._tray_icon:
+                    self._tray_icon.hide()
             finally:
-                return super().closeEvent(e)
-
-        # Ask user: Cancel / Exit / Minimize To Taskbar
-        mbox = QtWidgets.QMessageBox(self)
-        mbox.setIcon(QtWidgets.QMessageBox.Question)
-        mbox.setWindowTitle("Close Edition Manager")
-        mbox.setText("What would you like to do?")
-        mbox.setInformativeText("Choose Exit to fully quit (webhook will stop), or Minimize To Taskbar to keep it running in the background.")
-
-        btn_cancel   = mbox.addButton("Cancel", QtWidgets.QMessageBox.RejectRole)
-        btn_exit     = mbox.addButton("Exit", QtWidgets.QMessageBox.DestructiveRole)
-        btn_minimize = mbox.addButton("Minimize To Taskbar", QtWidgets.QMessageBox.ActionRole)
-        mbox.setDefaultButton(btn_minimize)
-
-        mbox.exec()
-        clicked = mbox.clickedButton()
-
-        if clicked is btn_cancel:
-            # Do nothing; keep GUI open
-            e.ignore()
+                e.accept()
+                QtWidgets.QApplication.quit()
             return
-        elif clicked is btn_exit:
-            # True exit path (stop webhook, then close)
-            self._should_exit = True
+
+        # If tray is available, ask the user what they want to do
+        if self._tray_icon and self._tray_icon.isVisible():
+            msg_box = QtWidgets.QMessageBox(self)
+            msg_box.setWindowTitle("Close Application")
+            msg_box.setText("What would you like to do?")
+            msg_box.setInformativeText("The scheduler and webhook will continue running if minimized to tray.")
+            msg_box.setIcon(QtWidgets.QMessageBox.Question)
+
+            btn_minimize = msg_box.addButton("Minimize to Tray", QtWidgets.QMessageBox.ActionRole)
+            btn_quit = msg_box.addButton("Quit", QtWidgets.QMessageBox.DestructiveRole)
+            btn_cancel = msg_box.addButton("Cancel", QtWidgets.QMessageBox.RejectRole)
+
+            msg_box.setDefaultButton(btn_minimize)
+
+            msg_box.exec()
+
+            clicked = msg_box.clickedButton()
+            if clicked == btn_minimize:
+                e.ignore()
+                self.hide()
+                self._tray_icon.showMessage(
+                    APP_TITLE,
+                    "Application minimized to system tray.\n"
+                    "Scheduler and webhook continue running.\n"
+                    "Right-click tray icon to quit.",
+                    QtWidgets.QSystemTrayIcon.Information,
+                    3000
+                )
+            elif clicked == btn_quit:
+                try:
+                    self._stop_webhook()
+                    if self._tray_icon:
+                        self._tray_icon.hide()
+                finally:
+                    e.accept()
+                    QtWidgets.QApplication.quit()
+            else:
+                # Cancel - don't close
+                e.ignore()
+        else:
+            # No tray, actually close
             try:
                 self._stop_webhook()
             finally:
                 e.accept()
-            return
-        else:
-            # Minimize to tray, keep webhook/processes alive
-            self._minimize_to_tray()
-            e.ignore()
-            return
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
@@ -1201,7 +1719,7 @@ def main():
 
     cfg = configparser.ConfigParser()
     if os.path.exists(CONFIG_FILE):
-        cfg.read(CONFIG_FILE)
+        cfg.read(CONFIG_FILE, encoding="utf-8")
     primary_color = cfg.get("appearance", "primary_color", fallback="#6750A4")
 
     apply_light_palette(app, primary_color)

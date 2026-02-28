@@ -2,15 +2,13 @@ import json
 import logging
 import threading
 import datetime as dt
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, request, jsonify
-from pathlib import Path
-from configparser import ConfigParser
 from edition_manager import (
     initialize_settings,
     process_movie_by_rating_key,
 )
-
 
 app = Flask(__name__)
 log = logging.getLogger("werkzeug")
@@ -26,18 +24,64 @@ log.setLevel(logging.WARNING)
     TMDB_API_KEY,
     MAX_WORKERS,
     BATCH_SIZE,
+    METADATA_BATCH_SIZE,
 ) = initialize_settings()
-
-_cfg = ConfigParser()
-_cfg.read(Path(__file__).parent / "config" / "config.ini")
-
-WEBHOOK_HOST = _cfg.get("webhook", "host", fallback="0.0.0.0")
-WEBHOOK_PORT = _cfg.getint("webhook", "port", fallback=5000)
 
 EXECUTOR = ThreadPoolExecutor(max_workers=2)
 
-_seen = set()
-_seen_lock = threading.Lock()
+
+class BoundedExpiringSet:
+    """A set with maximum size and TTL expiration to prevent memory leaks."""
+
+    def __init__(self, maxsize: int = 1000, ttl_seconds: int = 3600):
+        self._data = OrderedDict()  # key -> expiration timestamp
+        self._maxsize = maxsize
+        self._ttl = ttl_seconds
+        self._lock = threading.Lock()
+
+    def add(self, key) -> bool:
+        """Add key to set. Returns True if newly added, False if already present."""
+        now = dt.datetime.now(dt.timezone.utc).timestamp()
+
+        with self._lock:
+            # Clean expired entries
+            self._cleanup_expired(now)
+
+            # Check if already present and not expired
+            if key in self._data:
+                if self._data[key] > now:
+                    return False  # Already present and not expired
+                else:
+                    del self._data[key]  # Expired, remove it
+
+            # Evict oldest if at capacity
+            while len(self._data) >= self._maxsize:
+                self._data.popitem(last=False)
+
+            # Add new entry with expiration
+            self._data[key] = now + self._ttl
+            return True
+
+    def __contains__(self, key) -> bool:
+        now = dt.datetime.now(dt.timezone.utc).timestamp()
+        with self._lock:
+            if key not in self._data:
+                return False
+            if self._data[key] <= now:
+                del self._data[key]
+                return False
+            return True
+
+    def _cleanup_expired(self, now: float):
+        """Remove expired entries (call while holding lock)."""
+        expired = [k for k, exp in self._data.items() if exp <= now]
+        for k in expired:
+            del self._data[k]
+
+
+# Bounded set with 1000 max entries and 1 hour TTL
+_seen = BoundedExpiringSet(maxsize=1000, ttl_seconds=3600)
+_seen_lock = threading.Lock()  # Kept for backwards compatibility but set has internal lock
 
 ADD_WINDOW_MINUTES = 10
 
@@ -68,7 +112,8 @@ def _parse_added_at(value):
 def _submit_one_movie(rating_key: str):
     (
         SERVER, TOKEN, SKIP_LIBRARIES, MODULES, EXCLUDED_LANGUAGES,
-        SKIP_MULTIPLE_AUDIO_TRACKS, TMDB_API_KEY, MAX_WORKERS, BATCH_SIZE
+        SKIP_MULTIPLE_AUDIO_TRACKS, TMDB_API_KEY, MAX_WORKERS, BATCH_SIZE,
+        METADATA_BATCH_SIZE
     ) = initialize_settings()
 
     process_movie_by_rating_key(
@@ -112,21 +157,15 @@ def edition_manager():
     except Exception as e:
         print(f"[WARN] Error parsing addedAt '{added_at}': {e}")
 
-    with _seen_lock:
-        if rating_key in _seen:
-            return jsonify(duplicate=True), 202
-        _seen.add(rating_key)
+    # BoundedExpiringSet.add() returns True if newly added, False if duplicate
+    if not _seen.add(rating_key):
+        return jsonify(duplicate=True), 202
 
     EXECUTOR.submit(_submit_one_movie, rating_key)
 
     return jsonify(queued=True, ratingKey=rating_key), 202
 
 if __name__ == "__main__":
+
     from waitress import serve
-
-    logging.basicConfig(level=logging.INFO)
-    logging.getLogger(__name__).info(
-        "Starting Edition Manager webhook on %s:%s", WEBHOOK_HOST, WEBHOOK_PORT
-    )
-
-    serve(app, host=WEBHOOK_HOST, port=WEBHOOK_PORT)
+    serve(app, host="0.0.0.0", port=5000)
