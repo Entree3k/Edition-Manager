@@ -1,3 +1,7 @@
+<p align="center">
+  <strong>English</strong> &nbsp;|&nbsp; <a href="README.zh.md">中文</a>
+</p>
+
 <img width="4786" height="1024" alt="Edition Manager Logo" src="https://github.com/user-attachments/assets/4b6354d2-b580-4166-8df5-18efdcade733" />
 
 **Edition Manager** is a powerful utility that automatically generates and updates **Edition metadata** for your Plex movie library — turning your collection into a rich, visually consistent database of detailed technical and content information.
