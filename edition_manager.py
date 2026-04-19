@@ -39,6 +39,7 @@ from modules.SpecialFeatures import get_SpecialFeatures
 from modules.Studio import get_Studio
 from modules.VideoCodec import get_VideoCodec
 from modules.Writer import get_Writer
+from modules.i18n import set_locale, t
 
 # Module registry: maps module name to (function, required_args)
 # Args can be: 'movie_data', 'file_name', 'excluded_languages', 'skip_multiple_audio_tracks', 'tmdb_api_key'
@@ -365,6 +366,8 @@ def initialize_settings():
     config = ConfigParser()
     config.read(config_file, encoding="utf-8")
 
+    set_locale(config.get('ui', 'locale', fallback='auto'))
+
     server = config.get('server', 'address')
     token = config.get('server', 'token')
 
@@ -401,9 +404,9 @@ def initialize_settings():
         headers = {'X-Plex-Token': token, 'Accept': 'application/json'}
         response = make_request(f'{server}/library/sections', headers)
         server_name = response['MediaContainer'].get('friendlyName', server)
-        logger.info(f"Successfully connected to server: {server_name}")
+        logger.info(t('connected', name=server_name))
     except requests.exceptions.RequestException as err:
-        logger.error("Server connection failed, please check the settings in the configuration file or your network.")
+        logger.error(t('connect_failed'))
         time.sleep(10)
         raise SystemExit(err)
 
@@ -507,9 +510,9 @@ def process_movies(
             all_movies.extend(movies)
             library_info[lib_title] = len(movies)
 
-    logger.info(f"Total movies found: {len(all_movies)}")
+    logger.info(t('total_movies', count=len(all_movies)))
     for lib_title, count in library_info.items():
-        logger.info(f"Library: {lib_title}, Movies: {count}")
+        logger.info(t('library_count', title=lib_title, count=count))
 
     _progress_set_total(len(all_movies))
 
@@ -524,10 +527,10 @@ def process_movies(
             # Prefetch detailed metadata for entire batch in batched API calls
             # This reduces N individual API calls to N/metadata_batch_size calls
             rating_keys = [str(m['ratingKey']) for m in batch]
-            logger.info(f"Batch {batch_num}/{total_batches}: Prefetching metadata for {len(rating_keys)} movies...")
+            logger.info(t('batch_prefetching', num=batch_num, total=total_batches, count=len(rating_keys)))
 
             prefetched_metadata = fetch_metadata_batch(server, token, rating_keys, metadata_batch_size)
-            logger.info(f"Batch {batch_num}/{total_batches}: Prefetched {len(prefetched_metadata)} metadata entries")
+            logger.info(t('batch_prefetched', num=batch_num, total=total_batches, count=len(prefetched_metadata)))
 
             # Process movies with prefetched data (no individual API calls needed)
             futures = [
@@ -628,7 +631,7 @@ def process_single_movie(
     for module in modules:
         try:
             if module not in MODULE_REGISTRY:
-                logger.warning(f"Unknown module: {module}")
+                logger.warning(t('unknown_module', name=module))
                 continue
 
             func, arg_names = MODULE_REGISTRY[module]
@@ -639,9 +642,7 @@ def process_single_movie(
                 module_results[module] = v
 
         except Exception as e:
-            logger.error(
-                f"Error processing module {module} for {movie_data.get('title', 'Unknown')}: {str(e)}"
-            )
+            logger.error(t('processing_error', title=movie_data.get('title', 'Unknown'), err=str(e)))
 
     update_movie(server, token, movie_data, module_results, modules)
 
@@ -650,11 +651,11 @@ def process_movie_by_rating_key(
 ):
     movie = get_movie_by_rating_key(server, token, rating_key)
     if not movie:
-        logger.error(f"Movie with ratingKey {rating_key} not found.")
+        logger.error(t('movie_not_found', key=rating_key))
         return False
 
     # Log and send initial progress signal for GUI
-    logger.info(f"Processing ratingKey={rating_key} ...")
+    logger.info(t('processing_key', key=rating_key))
     print("PROGRESS 0")
     sys.stdout.flush()
 
@@ -718,9 +719,9 @@ def update_movie(server, token, movie, module_results, modules):
             )
             logger.info(f'{title}: {edition_title}')
         else:
-            logger.info(f'{title}: Cleared edition information')
+            logger.info(t('cleared_edition', title=title))
     else:
-        logger.info(f'{title}: Cleared edition information')
+        logger.info(t('cleared_edition', title=title))
 
     return True
 
@@ -735,7 +736,7 @@ def reset_movies(server, token, skip_libraries, max_workers, batch_size):
             movies = resp.get('MediaContainer', {}).get('Metadata', []) if resp else []
             to_reset.extend([m for m in movies if 'editionTitle' in m])
 
-    logger.info(f"Total movies to reset: {len(to_reset)}")
+    logger.info(t('total_reset', count=len(to_reset)))
     _progress_set_total(len(to_reset))
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -744,7 +745,7 @@ def reset_movies(server, token, skip_libraries, max_workers, batch_size):
         params = {'type': 1, 'id': movie_id, 'editionTitle.value': '', 'editionTitle.locked': 0}
         s = get_session()
         s.put(f'{server}/library/metadata/{movie_id}', headers={'X-Plex-Token': token}, params=params)
-        logger.info(f"Reset: {movie.get('title', 'Unknown')}")
+        logger.info(t('reset_one', title=movie.get('title', 'Unknown')))
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         for i in range(0, len(to_reset), batch_size):
@@ -752,7 +753,7 @@ def reset_movies(server, token, skip_libraries, max_workers, batch_size):
             futures = [ex.submit(_reset_one, m) for m in batch]
             for _ in as_completed(futures):
                 _progress_step()
-            logger.info(f"Reset batch {i//batch_size + 1}/{(len(to_reset)+batch_size-1)//batch_size}")
+            logger.info(t('reset_batch', num=i//batch_size + 1, total=(len(to_reset)+batch_size-1)//batch_size))
 
 # Reset a single movie
 def reset_movie(server, token, movie):
@@ -763,10 +764,10 @@ def reset_movie(server, token, movie):
         params = {'type': 1, 'id': movie_id, 'editionTitle.value': '', 'editionTitle.locked': 0}
         session = get_session()
         session.put(f'{server}/library/metadata/{movie_id}', headers={'X-Plex-Token': token}, params=params)
-        logger.info(f'Reset {title}')
+        logger.info(t('reset_one', title=title))
         return True
     except Exception as e:
-        logger.error(f"Error resetting movie {title}: {str(e)}")
+        logger.error(t('reset_error', title=title, err=str(e)))
         return False
 
 # Backup metadata
@@ -867,7 +868,7 @@ def create_undo_snapshot(server, token) -> Path | None:
         with tmp.open('w', encoding='utf-8') as f:
             json.dump(payload, f, indent=2)
         tmp.replace(UNDO_SNAPSHOT_FILE)
-        logger.info(f"Undo snapshot created with {len(payload['data'])} movies.")
+        logger.info(t('undo_snapshot_created', count=len(payload['data'])))
         return UNDO_SNAPSHOT_FILE
     except Exception as e:
         logger.warning(f"Could not write undo snapshot: {e}")
@@ -889,7 +890,7 @@ def restore_undo_snapshot(server, token) -> bool:
     Returns True if successful, False otherwise.
     """
     if not UNDO_SNAPSHOT_FILE.exists():
-        logger.error("No undo snapshot available.")
+        logger.error(t('undo_no_snapshot'))
         return False
 
     try:
@@ -901,11 +902,11 @@ def restore_undo_snapshot(server, token) -> bool:
 
     data = metadata.get("data", {})
     if not data:
-        logger.error("Undo snapshot is empty.")
+        logger.error(t('undo_empty'))
         return False
 
     items = list(data.items())
-    logger.info(f"Restoring from undo snapshot ({len(items)} movies)...")
+    logger.info(t('undo_restoring', count=len(items)))
     _progress_set_total(len(items))
 
     def _restore_one(pair):
@@ -916,7 +917,7 @@ def restore_undo_snapshot(server, token) -> bool:
         try:
             s.put(f'{server}/library/metadata/{movie_id}', headers={'X-Plex-Token': token}, params=params)
         except Exception as e:
-            logger.error(f"Failed restore id={movie_id}: {e}")
+            logger.error(t('restore_failed', id=movie_id, err=e))
         finally:
             _progress_step()
 
@@ -926,7 +927,7 @@ def restore_undo_snapshot(server, token) -> bool:
         for _ in as_completed(futures):
             pass
 
-    logger.info("Undo restore complete.")
+    logger.info(t('undo_restore_complete'))
     return True
 
 
@@ -945,14 +946,14 @@ def restore_metadata(server, token, backup_file: Path | str | None):
         # Fallback to latest backup if none specified
         bf = latest_backup()
         if not bf:
-            logger.error("No backup files found.")
+            logger.error(t('no_backup_files'))
             return
         backup_file = bf
-        logger.info(f"Using latest backup: {backup_file}")
+        logger.info(t('using_latest_backup', path=backup_file))
 
     backup_file = Path(backup_file)
     if not backup_file.exists():
-        logger.error(f"Backup file not found: {backup_file}")
+        logger.error(t('backup_not_found', path=backup_file))
         return
 
     with backup_file.open('r', encoding='utf-8') as f:
@@ -961,7 +962,7 @@ def restore_metadata(server, token, backup_file: Path | str | None):
     data = metadata.get("data", metadata)  # backward compatible if old format
     items = list(data.items())
 
-    logger.info(f"Starting restore from {backup_file} for {len(items)} movies")
+    logger.info(t('starting_restore', path=backup_file, count=len(items)))
     _progress_set_total(len(items))
 
     def _restore_one(pair):
@@ -972,7 +973,7 @@ def restore_metadata(server, token, backup_file: Path | str | None):
         try:
             s.put(f'{server}/library/metadata/{movie_id}', headers={'X-Plex-Token': token}, params=params)
         except Exception as e:
-            logger.error(f"Failed restore id={movie_id}: {e}")
+            logger.error(t('restore_failed', id=movie_id, err=e))
         finally:
             _progress_step()
 
@@ -982,7 +983,7 @@ def restore_metadata(server, token, backup_file: Path | str | None):
         for _ in as_completed(futures):
             pass
 
-    logger.info("Restore complete.")
+    logger.info(t('restore_complete'))
 
 def main():
     (
@@ -1017,76 +1018,76 @@ def main():
         ok = process_movie_by_rating_key(
             server, token, args.one_id, modules, excluded_languages, skip_multiple_audio_tracks, tmdb_api_key
         )
-        logger.info('Done.' if ok else 'Failed.')
+        logger.info(t('done') if ok else t('failed'))
 
     elif args.one:
         # Interactive terminal flow
-        title = input("Enter movie title to search: ").strip()
+        title = input(t('prompt_enter_title')).strip()
         if not title:
-            logger.info("No title entered.")
+            logger.info(t('no_title_entered'))
             return
         matches = find_movies_by_title(server, token, title)
         if not matches:
-            logger.info(f"No movies found for '{title}'.")
+            logger.info(t('no_movies_found', title=title))
             return
 
-        print(f"\nFound {len(matches)} match(es):")
+        print(t('found_matches', count=len(matches)))
         for i, m in enumerate(matches,  start=1):
             print(f"{i}. {m.get('title','?')} ({m.get('year','?')}) — {m.get('library','')}")
-        sel = input("\nSelect a number (or Enter for 1): ").strip() or "1"
+        sel = input(t('prompt_select_number')).strip() or "1"
         try:
             idx = int(sel) - 1
             if idx < 0 or idx >= len(matches):
                 raise ValueError
         except ValueError:
-            print("Invalid selection.")
+            print(t('invalid_selection'))
             return
 
         chosen = matches[idx]
-        confirm = input(f"Process '{chosen['title']}' ({chosen.get('year','?')}) from {chosen.get('library','')}? [y/N]: ").strip().lower()
+        confirm = input(t('prompt_confirm', title=chosen['title'], year=chosen.get('year','?'), library=chosen.get('library',''))).strip().lower()
         if confirm != 'y':
-            print("Cancelled.")
+            print(t('cancelled'))
             return
 
         ok = process_movie_by_rating_key(
             server, token, chosen['ratingKey'], modules, excluded_languages, skip_multiple_audio_tracks, tmdb_api_key
         )
-        logger.info('Done.' if ok else 'Failed.')
+        logger.info(t('done') if ok else t('failed'))
 
     elif args.backup:
         backup_metadata(server, token, None)
-        logger.info('Metadata backup completed.')
+        logger.info(t('backup_completed'))
 
     elif args.restore_file:
         restore_metadata(server, token, args.restore_file)
-        logger.info('Metadata restoration completed.')
+        logger.info(t('restore_completed'))
 
     elif args.restore:
         # Restore using the latest timestamped backup automatically
         restore_metadata(server, token, None)
-        logger.info('Metadata restoration completed.')
+        logger.info(t('restore_completed'))
 
     elif args.list_backups:
         files = list_backups()
         if not files:
-            print("No backups found in", BACKUP_DIR)
+            print(t('no_backups_found', path=BACKUP_DIR))
         else:
-            print("Available backups:")
+            print(t('available_backups'))
             for p in files:
                 print(" -", p)
-        logger.info('Listed backups.')
+        logger.info(t('listed_backups'))
 
     elif args.undo:
         # Restore from the undo snapshot
         ok = restore_undo_snapshot(server, token)
         if ok:
-            logger.info('Undo completed successfully.')
+            logger.info(t('undo_success'))
         else:
-            logger.error('Undo failed - no snapshot available or restore error.')
+            logger.error(t('undo_failed'))
 
     elif args.all:
         # Create undo snapshot before processing (separate from manual backups)
-        logger.info("Creating undo snapshot before processing...")
+        logger.info(t('undo_snapshot_creating_process'))
         create_undo_snapshot(server, token)
 
         process_movies(
@@ -1104,7 +1105,7 @@ def main():
 
     elif args.reset:
         # Create undo snapshot before reset (separate from manual backups)
-        logger.info("Creating undo snapshot before reset...")
+        logger.info(t('undo_snapshot_creating_reset'))
         create_undo_snapshot(server, token)
 
         reset_movies(
@@ -1116,14 +1117,14 @@ def main():
         )
 
     else:
-        logger.info('No action specified. Please use one of the following arguments:')
-        logger.info('  --all: Add edition info to all movies')
-        logger.info('  --one: Add edition info to one movie')
-        logger.info('  --reset: Reset edition info for all movies')
-        logger.info('  --backup: Backup movie metadata')
-        logger.info('  --restore: Restore movie metadata from backup')
+        logger.info(t('no_action'))
+        logger.info(t('help_all'))
+        logger.info(t('help_one'))
+        logger.info(t('help_reset'))
+        logger.info(t('help_backup'))
+        logger.info(t('help_restore'))
 
-    logger.info('Script execution completed.')
+    logger.info(t('script_done'))
 
 if __name__ == '__main__':
     main()
