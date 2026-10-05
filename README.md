@@ -1,3 +1,4 @@
+
 <img width="4786" height="1024" alt="Edition Manager Logo" src="https://github.com/user-attachments/assets/4b6354d2-b580-4166-8df5-18efdcade733" />
 
 **Edition Manager** is a powerful utility that automatically generates and updates **Edition metadata** for your Plex movie library — turning your collection into a rich, visually consistent database of detailed technical and content information.
@@ -46,7 +47,7 @@ Each module extracts a specific piece of metadata and contributes it to your Ple
 | FrameRate | Frame rate | `24fps`, `60fps` |
 | Genre | Primary genre | `Drama`, `Sci-Fi` |
 | Language | Audio language | `English`, `Japanese` |
-| Rating | IMDb / Rotten Tomatoes | `8.4`, `92%` |
+| Rating | IMDb / Rotten Tomatoes / Letterboxd | `8.4`, `92%`, `3.5/5`|
 | Release | Special release | `Criterion Edition`, `Anniversary Edition` |
 | Resolution | Video resolution | `1080p`, `4K` |
 | Size | File size | `58.2 GB` |
@@ -94,7 +95,7 @@ Backup Edition metadata `python edition_manager.py --backup`
 
 Restore metadata from backup `python edition_manager.py --restore`
 
-Restore from a specific file `python edition_manager.py --restore-file <file_name>`
+Revert Last ---all or --reset `python edition_manager.py --undo`
 
 List available backups `python edition_manager.py --list-backups`
 
@@ -202,7 +203,7 @@ Submit issues or pull requests for new modules, bug fixes, or improvements.
 
 ## License
 
-This project is licensed under the **MIT License**.
+This project is licensed under the **GPL-3.0**.
 
 ## Acknowledgements
 
